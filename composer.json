@@ -1,0 +1,43 @@
+{
+    "name": "kode/context",
+    "description": "PHP 协程/纤程上下文管理包，为多线程、多进程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制",
+    "type": "library",
+    "license": "Apache-2.0",
+    "authors": [
+        {
+            "name": "Kode Team",
+            "email": "kode@example.com"
+        }
+    ],
+    "require": {
+        "php": "^8.1"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.0",
+        "swoole/ide-helper": "^5.0",
+        "phpstan/phpstan": "^1.10"
+    },
+    "autoload": {
+        "psr-4": {
+            "Kode\\Context\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Kode\\Context\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "extra": {
+        "branch-alias": {
+            "dev-main": "1.x-dev"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "test-coverage": "phpunit --coverage-html coverage",
+        "analyse": "phpstan analyse",
+        "analyse-baseline": "phpstan analyse --generate-baseline"
+    }
+}
