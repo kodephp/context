@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2025-09-20
+
+### Added
+- Enhanced Context class with new methods:
+  - `keys()` - Get all context key names
+  - `count()` - Get the number of key-value pairs in context
+  - `all()` - Get all context data
+  - `merge()` - Merge array data into context
+- Updated unit tests to cover new methods
+- Updated documentation and examples
+
 ## [1.0.0] - 2025-09-19
 
 ### Added
