@@ -5,6 +5,7 @@
 /phpunit.xml
 /.phpunit.cache/
 /phpstan.neon.tmp
+phpstan.neon
 
 # IDE
 /.idea/
