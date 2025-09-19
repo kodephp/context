@@ -17,7 +17,7 @@ Thumbs.db
 
 # Composer
 /composer.phar
-*/composer.lock
+composer.lock
 
 # Logs
 /logs/*.log
