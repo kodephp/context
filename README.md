@@ -276,21 +276,21 @@ class Context
 
 ## 🧪 性能基准测试
 
-以下是 `Context` 类各方法的性能基准测试结果（在 PHP 8.3 环境下运行）：
+在 Windows 11 (AMD Ryzen 7 5800H, 32GB RAM) 上对 `kode/context` 进行了性能测试，迭代次数 100,000 次：
 
-```
-=== kode/context 性能基准测试 ===
-
-Context::set()           :     8.43 ms (11858365 ops/sec) | Memory:      376
-Context::get()           :     8.38 ms (11929192 ops/sec) | Memory:        0
-Context::has()           :     8.17 ms (12235425 ops/sec) | Memory:        0
-Context::delete()        :    15.48 ms ( 6461224 ops/sec) | Memory:      376
-Context::clear()         :    22.45 ms ( 4454112 ops/sec) | Memory:        0
-Context::copy()          :     8.51 ms (11748092 ops/sec) | Memory:        0
-Context::run()           :    39.51 ms ( 2530744 ops/sec) | Memory:        0
-
-=== 基准测试完成 ===
-```
+| 方法 | 执行时间 | 每秒操作数 |
+|------|---------|----------|
+| `Context::set()` | 8.38ms | 11,930,549 |
+| `Context::get()` | 8.81ms | 11,346,997 |
+| `Context::has()` | 8.11ms | 12,335,099 |
+| `Context::delete()` | 14.74ms | 6,782,509 |
+| `Context::clear()` | 22.14ms | 4,516,074 |
+| `Context::copy()` | 8.44ms | 11,855,349 |
+| `Context::run()` | 36.10ms | 2,770,016 |
+| `Context::keys()` | 9.46ms | 10,569,523 |
+| `Context::count()` | 9.47ms | 10,560,741 |
+| `Context::all()` | 7.98ms | 12,533,030 |
+| `Context::merge()` | 16.60ms | 6,022,664 |
 
 这些结果表明 `kode/context` 在各种操作上都具有出色的性能表现，适合在高并发环境中使用。
 

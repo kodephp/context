@@ -93,4 +93,34 @@ benchmark('Context::run()', function () {
     });
 });
 
+// 测试Context::keys()
+Context::set('keys_key1', 'keys_value1');
+Context::set('keys_key2', 'keys_value2');
+benchmark('Context::keys()', function () {
+    Context::keys();
+});
+
+// 测试Context::count()
+Context::set('count_key1', 'count_value1');
+Context::set('count_key2', 'count_value2');
+Context::set('count_key3', 'count_value3');
+benchmark('Context::count()', function () {
+    Context::count();
+});
+
+// 测试Context::all()
+Context::set('all_key1', 'all_value1');
+Context::set('all_key2', 'all_value2');
+benchmark('Context::all()', function () {
+    Context::all();
+});
+
+// 测试Context::merge()
+benchmark('Context::merge()', function () {
+    Context::merge([
+        'merge_key1' => 'merge_value1',
+        'merge_key2' => 'merge_value2'
+    ]);
+});
+
 echo "\n=== 基准测试完成 ===\n";
