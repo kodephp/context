@@ -1,4 +1,13 @@
 parameters:
-    level: 8
+    level: max
     paths:
         - src
+        - tests
+    ignoreErrors:
+        - '#Call to static method .+ on an unknown class Swoole\\Coroutine#'
+        - '#Call to static method .+ on an unknown class Swow\\Coroutine#'
+        - '#Cannot access offset .+ on mixed#'
+        - '#Static property .+ does not accept mixed#'
+        - '#Method .+ has parameter \$fiber with generic class Fiber but does not specify its types#'
+        - '#Parameter .+ of function spl_object_id expects object, Fiber#'
+    reportUnmatchedIgnoredErrors: false

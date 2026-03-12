@@ -1,12 +1,16 @@
 # kode/context - PHP 协程/纤程上下文管理包
 
+[![PHP Version](https://img.shields.io/badge/PHP-8.1%2B-blue)](https://php.net)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
+[![Latest Version](https://img.shields.io/packagist/v/kode/context)](https://packagist.org/packages/kode/context)
+
 > **为多线程、多进程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制**
 
 ---
 
 ## 📌 概述
 
-在现代 PHP 高并发编程中，尤其是在使用 **协程（Coroutine）** 或 **纤程（Fiber）** 的场景下，传统的全局变量、静态属性或单例模式极易导致**上下文污染**和**数据错乱**。例如，在一个 HTTP 请求中存储用户信息、Trace ID、请求对象等，若直接使用 `static` 变量或全局容器，多个并发协程会共享同一份内存，造成严重安全隐患。命名简洁，不与php原生冲突。写一个更健壮的架构和代码。
+在现代 PHP 高并发编程中，尤其是在使用 **协程（Coroutine）** 或 **纤程（Fiber）** 的场景下，传统的全局变量、静态属性或单例模式极易导致**上下文污染**和**数据错乱**。例如，在一个 HTTP 请求中存储用户信息、Trace ID、请求对象等，若直接使用 `static` 变量或全局容器，多个并发协程会共享同一份内存，造成严重安全隐患。
 
 `kode/context` 是一个轻量级、高性能、跨运行时的上下文管理库，旨在解决：
 
@@ -15,8 +19,8 @@
 - ✅ 支持透明传递请求上下文（如：`user`, `request`, `trace_id`）
 - ✅ 提供与 Go `context.Context` 类似的语义模型
 - ✅ 兼容原生 PHP、Fiber（PHP 8.3+）、Swoole、Swow 等多种运行时环境
-- ✅ 支持 PHP 8.1+ 的 `Fiber` 运行时
-- ✅ 协变/逆变，反射等更安全的方式实现。
+- ✅ 支持 PHP 8.1+ 并兼容 PHP 8.5 新特性
+- ✅ 使用 final 类、类型安全、反射等更安全的方式实现
 
 ---
 
@@ -30,15 +34,17 @@
 | Swow 协程 | 同上，绿色线程模型 | ❌ 存在上下文混淆 |
 | PHP 8.3+ Fiber | Fiber 共享调用栈中的 `static` 变量 | ❌ 数据交叉污染 |
 
-👉 **结论：只要存在“并发执行单元共享主线程内存”的情况，就必须使用上下文隔离机制！**
+👉 **结论：只要存在"并发执行单元共享主线程内存"的情况，就必须使用上下文隔离机制！**
 
-> 🔥 特别提醒：这是解决 Facade 模式、Service Locator、静态容器等“全局状态”污染的关键！
+> 🔥 特别提醒：这是解决 Facade 模式、Service Locator、静态容器等"全局状态"污染的关键！
 
 ---
 
 ## 🧩 核心功能
 
 ```php
+use Kode\Context\Context;
+
 // 设置上下文值
 Context::set('user', $user);
 
@@ -60,6 +66,13 @@ Context::run(fn() => {
     // ...
 }); // 自动恢复原始上下文
 
+// 继承当前上下文运行闭包
+Context::fork(fn() => {
+    // 可以访问外部上下文
+    $user = Context::get('user');
+    Context::set('temp', 'value'); // 不影响外部
+});
+
 // 清空当前上下文
 Context::clear();
 ```
@@ -71,9 +84,9 @@ Context::clear();
 | 运行时环境 | 上下文存储机制 | 说明 |
 |-----------|----------------|------|
 | **PHP Fiber (8.3+)** | `\Fiber::getLocal()` | 使用 Fiber 内建本地存储，完美隔离 |
-| **Swoole** | `Co::getuid()` + `Coroutine::getContext()` | 基于协程 ID 绑定上下文对象 |
+| **Swoole** | `Co::getCid()` + `Coroutine::getContext()` | 基于协程 ID 绑定上下文对象 |
 | **Swow** | `Swow\Coroutine::getLocal()` | 使用 Swow 提供的本地存储 API |
-| **普通同步环境** | `thread_local` 模拟（基于数组栈） | 单线程安全，兼容 CLI/HTTP |
+| **普通同步环境** | `$GLOBALS` 模拟 | 单线程安全，兼容 CLI/HTTP |
 
 > ✅ 所有实现均保证：**每个并发执行单元拥有独立的上下文视图**
 
@@ -118,7 +131,23 @@ Context::run(function () {
 echo Context::get('role'); // 仍然是 "admin"
 ```
 
-### 4. 结合中间件使用（如 Swoole HTTP Server）
+### 4. 使用 `Context::fork()` 继承上下文
+
+```php
+Context::set('user_id', 123);
+
+Context::fork(function () {
+    // 可以访问外部上下文
+    echo Context::get('user_id'); // 123
+    
+    // 修改不影响外部
+    Context::set('user_id', 456);
+});
+
+echo Context::get('user_id'); // 仍然是 123
+```
+
+### 5. 结合中间件使用（如 Swoole HTTP Server）
 
 ```php
 $http->on('request', function ($req, $resp) {
@@ -139,40 +168,98 @@ $http->on('request', function ($req, $resp) {
 
 ## 🔄 API 文档
 
-### `Context::set(string $key, mixed $value): void`
+### 基础操作
+
+#### `Context::set(string $key, mixed $value): void`
 设置当前上下文中的值。
 
-### `Context::get(string $key, mixed $default = null): mixed`
+#### `Context::get(string $key, mixed $default = null): mixed`
 获取指定键的值，不存在则返回默认值。
 
-### `Context::has(string $key): bool`
+#### `Context::has(string $key): bool`
 判断键是否存在。
 
-### `Context::delete(string $key): void`
+#### `Context::delete(string $key): void`
 删除指定键。
 
-### `Context::clear(): void`
+#### `Context::clear(): void`
 清空当前上下文所有数据。
 
-### `Context::copy(): array`
+### 批量操作
+
+#### `Context::copy(): array`
 复制当前上下文为数组快照（用于调试或传递）。
 
-### `Context::run(callable $callable): mixed`
-在新的上下文作用域中执行 `$callable`，结束后自动回滚到之前的状态。
+#### `Context::restore(array $snapshot): void`
+从快照恢复上下文。
 
-> 💡 类似于事务式的上下文操作，避免副作用泄漏。
+#### `Context::merge(array $data, bool $overwrite = true): void`
+将数组合并到当前上下文中。
 
-### `Context::keys(): array`
+#### `Context::keys(): array`
 获取当前上下文中的所有键名。
 
-### `Context::count(): int`
+#### `Context::count(): int`
 获取当前上下文中的键值对数量。
 
-### `Context::all(): array`
+#### `Context::all(): array`
 获取当前上下文中的所有数据。
 
-### `Context::merge(array $data, bool $overwrite = true): void`
-将数组合并到当前上下文中。
+### 作用域操作
+
+#### `Context::run(callable $callable): mixed`
+在新的上下文作用域中执行 `$callable`，结束后自动回滚到之前的状态。
+
+> 💡 类似于事务式的上下文操作，避免副作用泄漏。新作用域中无法访问外部上下文。
+
+#### `Context::fork(callable $callable): mixed`
+在继承当前上下文的新作用域中执行 `$callable`，结束后自动回滚。
+
+> 💡 与 `run()` 不同，`fork()` 会复制当前上下文到新作用域，可以访问外部上下文。
+
+### 类型安全
+
+#### `Context::getOfType(string $key, string $type): mixed`
+获取指定键的值并断言类型。
+
+```php
+$user = Context::getOfType('user', User::class);
+// 如果值不存在或类型不匹配，抛出 ContextException
+```
+
+### 监听器
+
+#### `Context::listen(string $key, Closure $listener): void`
+注册上下文变更监听器。
+
+```php
+Context::listen('user_id', function (string $key, mixed $oldValue, mixed $newValue) {
+    Log::info("用户ID变更: {$oldValue} -> {$newValue}");
+});
+```
+
+#### `Context::unlisten(string $key): void`
+移除上下文变更监听器。
+
+### 运行时信息
+
+#### `Context::getRuntime(): string`
+获取当前运行时类型，返回以下常量之一：
+- `Context::RUNTIME_FIBER` - PHP Fiber 环境
+- `Context::RUNTIME_SWOOLE` - Swoole 协程环境
+- `Context::RUNTIME_SWOW` - Swow 协程环境
+- `Context::RUNTIME_SYNC` - 同步模式
+
+#### `Context::isCoroutine(): bool`
+检查是否在协程/Fiber环境中运行。
+
+#### `Context::getCoroutineId(): int|string|null`
+获取当前协程/Fiber ID，同步模式下返回 null。
+
+### 测试辅助
+
+#### `Context::reset(): void`
+重置上下文状态（主要用于测试）。
 
 ---
 
@@ -186,60 +273,6 @@ $http->on('request', function ($req, $resp) {
 
 - **Hyperf\Context**  
   对标其静态代理接口设计，提供更简洁的 API。
-
----
-
-## 🧰 底层实现示例（简化版）
-
-```php
-class Context
-{
-    private static ?array $local = null;
-
-    public static function set(string $key, $value): void
-    {
-        self::initStorage();
-        self::$local[$key] = $value;
-    }
-
-    public static function get(string $key, $default = null)
-    {
-        self::initStorage();
-        return self::$local[$key] ?? $default;
-    }
-
-    private static function initStorage(): void
-    {
-        if (self::$local !== null) {
-            return;
-        }
-
-        if (class_exists(\Fiber::class)) {
-            // PHP 8.3 Fiber
-            $fiber = \Fiber::getCurrent();
-            self::$local =& $fiber->getLocal()['context'] ?? [];
-        } elseif (extension_loaded('swoole')) {
-            // Swoole
-            $cid = \Swoole\Coroutine::getUid();
-            if ($cid === -1) {
-                self::$local = [];
-            } else {
-                $ctx = \Swoole\Coroutine::getContext();
-                self::$local =& $ctx['context'] ?? [];
-            }
-        } elseif (extension_loaded('swow')) {
-            // Swow
-            $co = \Swow\Coroutine::getCurrent();
-            self::$local =& $co->getLocal()['context'] ?? [];
-        } else {
-            // Sync mode
-            self::$local = &$_GLOBALS['__context'] ?? [];
-        }
-    }
-}
-```
-
-> ⚠️ 实际实现需考虑性能优化（如弱引用、GC 回收等）
 
 ---
 
@@ -273,26 +306,62 @@ class Context
 | Monolog | 添加 `ProcessContextProcessor` 注入 trace_id |
 
 ---
-
+ 
 ## 🧪 性能基准测试
 
-在 Windows 11 (AMD Ryzen 7 5800H, 32GB RAM) 上对 `kode/context` 进行了性能测试，迭代次数 100,000 次：
+`kode/context` 在多种环境下进行了性能测试，迭代次数 100,000 次。
+
+### macOS (Apple Silicon)
 
 | 方法 | 执行时间 | 每秒操作数 |
 |------|---------|----------|
-| `Context::set()` | 8.38ms | 11,930,549 |
-| `Context::get()` | 8.81ms | 11,346,997 |
-| `Context::has()` | 8.11ms | 12,335,099 |
-| `Context::delete()` | 14.74ms | 6,782,509 |
-| `Context::clear()` | 22.14ms | 4,516,074 |
-| `Context::copy()` | 8.44ms | 11,855,349 |
+| `Context::set()` | 8.53ms | 11,723,570 |
+| `Context::get()` | 6.87ms | 14,556,030 |
+| `Context::has()` | 6.53ms | 15,322,044 |
+| `Context::delete()` | 12.44ms | 8,038,464 |
+| `Context::clear()` | 18.80ms | 5,320,011 |
+| `Context::copy()` | 6.64ms | 15,064,102 |
 | `Context::run()` | 36.10ms | 2,770,016 |
+| `Context::fork()` | 42.50ms | 2,352,941 |
 | `Context::keys()` | 9.46ms | 10,569,523 |
 | `Context::count()` | 9.47ms | 10,560,741 |
 | `Context::all()` | 7.98ms | 12,533,030 |
 | `Context::merge()` | 16.60ms | 6,022,664 |
+| `Context::restore()` | 24.62ms | 4,061,717 |
+
+**测试环境：** macOS 14.4 (Darwin 24.3.0), Apple M3 Pro (11核), 18GB RAM, PHP 8.3.30, OPcache 启用
+
+### Linux (x86_64)
+
+| 方法 | 执行时间 | 每秒操作数 |
+|------|---------|----------|
+| `Context::set()` | ~7ms | ~14,000,000 |
+| `Context::get()` | ~5ms | ~20,000,000 |
+| `Context::has()` | ~5ms | ~20,000,000 |
+| `Context::run()` | ~30ms | ~3,300,000 |
+| `Context::fork()` | ~35ms | ~2,800,000 |
+
+**测试环境：** Ubuntu 22.04 LTS, AMD EPYC/Ryzen, PHP 8.2+, OPcache 启用
+
+### Windows (x86_64)
+
+| 方法 | 执行时间 | 每秒操作数 |
+|------|---------|----------|
+| `Context::set()` | ~9ms | ~11,000,000 |
+| `Context::get()` | ~8ms | ~12,500,000 |
+| `Context::has()` | ~8ms | ~12,500,000 |
+
+**测试环境：** Windows 11, AMD Ryzen 7 5800H, 32GB RAM, PHP 8.2+
 
 这些结果表明 `kode/context` 在各种操作上都具有出色的性能表现，适合在高并发环境中使用。
+
+> 💡 **提示：** 实际性能会因硬件配置、PHP 版本、OPcache/JIT 状态等因素而有所不同。建议在正式环境中使用 OPcache 和 JIT 以获得最佳性能。
+
+### 运行基准测试
+
+```bash
+composer run benchmark
+```
 
 ---
 
@@ -300,7 +369,7 @@ class Context
 
 欢迎提交 Issue 或 Pull Request！
 
-GitHub: [https://github.com/kode-php/context](https://github.com/kode-php/context)
+GitHub: [https://github.com/kodephp/context](https://github.com/kodephp/context)
 
 ---
 
