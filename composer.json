@@ -4,7 +4,7 @@
     "keywords": ["context", "coroutine", "fiber", "swoole", "swow", "request-context", "php8", "distributed", "tracing", "上下文", "协程", "纤程", "分布式"],
     "homepage": "https://github.com/kodephp/context",
     "license": "Apache-2.0",
-    "version": "2.1.1",
+    "version": "2.1.2",
     "authors": [
         {
             "name": "KodePHP",
