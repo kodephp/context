@@ -9,18 +9,20 @@ use Fiber;
 use ReflectionClass;
 use ReflectionException;
 use Throwable;
+use JsonSerializable;
 
 /**
  * 上下文管理类
  *
  * 为多线程、多进程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制。
  * 支持 PHP 8.1+ 并兼容 PHP 8.5 新特性。
+ * 支持分布式多机器部署场景的上下文序列化和传递。
  *
  * @package Kode\Context
  * @author  KodePHP <382601296@qq.com>
  * @license Apache-2.0
  */
-final class Context
+final class Context implements JsonSerializable
 {
     /**
      * 上下文数据存储
@@ -52,6 +54,17 @@ final class Context
      * @var array<string, array<Closure>>
      */
     private static array $listeners = [];
+
+    /**
+     * 分布式追踪相关键名
+     */
+    public const TRACE_ID = 'trace_id';
+    public const SPAN_ID = 'span_id';
+    public const PARENT_SPAN_ID = 'parent_span_id';
+    public const NODE_ID = 'node_id';
+    public const SOURCE_NODE_ID = 'source_node_id';
+    public const REQUEST_ID = 'request_id';
+    public const CORRELATION_ID = 'correlation_id';
 
     /**
      * 运行时类型常量
@@ -389,6 +402,290 @@ final class Context
         self::$listeners = [];
     }
 
+    // ==================== 分布式支持 ====================
+
+    /**
+     * 序列化上下文为 JSON 字符串
+     *
+     * 用于分布式系统中跨节点传递上下文
+     *
+     * @param array<string> $onlyKeys 仅序列化指定的键，为空则序列化全部
+     * @return string JSON 字符串
+     * @throws ContextException 如果序列化失败
+     */
+    public static function toJson(array $onlyKeys = []): string
+    {
+        self::initStorage();
+        $data = $onlyKeys === [] ? self::$local : array_intersect_key(
+            self::$local,
+            array_flip($onlyKeys)
+        );
+
+        $serializable = [];
+        foreach ($data as $key => $value) {
+            $serializable[$key] = self::serializeValue($value);
+        }
+
+        try {
+            $json = json_encode($serializable, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new ContextException('上下文序列化失败: ' . $e->getMessage(), 0, $e);
+        }
+
+        return $json;
+    }
+
+    /**
+     * 从 JSON 字符串反序列化上下文
+     *
+     * @param string $json      JSON 字符串
+     * @param bool   $merge     是否合并到现有上下文，false 则替换
+     * @return array<string, mixed> 反序列化后的数据
+     * @throws ContextException 如果反序列化失败
+     */
+    public static function fromJson(string $json, bool $merge = false): array
+    {
+        try {
+            $data = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new ContextException('上下文反序列化失败: ' . $e->getMessage(), 0, $e);
+        }
+
+        if (!is_array($data)) {
+            throw new ContextException('无效的上下文数据格式');
+        }
+
+        $result = [];
+        foreach ($data as $key => $value) {
+            $result[$key] = self::unserializeValue($value);
+        }
+
+        if ($merge) {
+            self::merge($result);
+        } else {
+            self::restore($result);
+        }
+
+        return $result;
+    }
+
+    /**
+     * 导出可序列化的上下文数据
+     *
+     * @param array<string> $onlyKeys 仅导出指定的键
+     * @return array<string, mixed>
+     */
+    public static function export(array $onlyKeys = []): array
+    {
+        self::initStorage();
+        $data = $onlyKeys === [] ? self::$local : array_intersect_key(
+            self::$local,
+            array_flip($onlyKeys)
+        );
+
+        $result = [];
+        foreach ($data as $key => $value) {
+            $result[$key] = self::serializeValue($value);
+        }
+
+        return $result;
+    }
+
+    /**
+     * 导入上下文数据
+     *
+     * @param array<string, mixed> $data  导入的数据
+     * @param bool                 $merge 是否合并到现有上下文
+     * @return array<string, mixed>
+     */
+    public static function import(array $data, bool $merge = false): array
+    {
+        $result = [];
+        foreach ($data as $key => $value) {
+            $result[$key] = self::unserializeValue($value);
+        }
+
+        if ($merge) {
+            self::merge($result);
+        } else {
+            self::restore($result);
+        }
+
+        return $result;
+    }
+
+    /**
+     * 创建分布式追踪上下文
+     *
+     * @param string|null $traceId 追踪ID，为空则自动生成
+     * @param string|null $nodeId   当前节点ID
+     * @return string 生成的 Trace ID
+     */
+    public static function startTrace(?string $traceId = null, ?string $nodeId = null): string
+    {
+        $traceId = $traceId ?? self::generateTraceId();
+        $spanId = self::generateSpanId();
+
+        self::set(self::TRACE_ID, $traceId);
+        self::set(self::SPAN_ID, $spanId);
+
+        if ($nodeId !== null) {
+            self::set(self::NODE_ID, $nodeId);
+        }
+
+        return $traceId;
+    }
+
+    /**
+     * 创建子 Span
+     *
+     * @return string 新的 Span ID
+     */
+    public static function startSpan(): string
+    {
+        $parentSpanId = self::get(self::SPAN_ID);
+        $newSpanId = self::generateSpanId();
+
+        if ($parentSpanId !== null) {
+            self::set(self::PARENT_SPAN_ID, $parentSpanId);
+        }
+
+        self::set(self::SPAN_ID, $newSpanId);
+
+        return $newSpanId;
+    }
+
+    /**
+     * 获取追踪信息
+     *
+     * @return array{trace_id: string|null, span_id: string|null, parent_span_id: string|null, node_id: string|null}
+     */
+    public static function getTraceInfo(): array
+    {
+        $traceId = self::get(self::TRACE_ID);
+        $spanId = self::get(self::SPAN_ID);
+        $parentSpanId = self::get(self::PARENT_SPAN_ID);
+        $nodeId = self::get(self::NODE_ID);
+
+        return [
+            self::TRACE_ID => is_string($traceId) ? $traceId : null,
+            self::SPAN_ID => is_string($spanId) ? $spanId : null,
+            self::PARENT_SPAN_ID => is_string($parentSpanId) ? $parentSpanId : null,
+            self::NODE_ID => is_string($nodeId) ? $nodeId : null,
+        ];
+    }
+
+    /**
+     * 设置来源节点信息（用于分布式调用）
+     *
+     * @param string $sourceNodeId 来源节点ID
+     */
+    public static function setSourceNode(string $sourceNodeId): void
+    {
+        self::set(self::SOURCE_NODE_ID, $sourceNodeId);
+    }
+
+    /**
+     * 设置关联ID（用于请求关联）
+     *
+     * @param string $correlationId 关联ID
+     */
+    public static function setCorrelationId(string $correlationId): void
+    {
+        self::set(self::CORRELATION_ID, $correlationId);
+    }
+
+    /**
+     * 设置请求ID
+     *
+     * @param string $requestId 请求ID
+     */
+    public static function setRequestId(string $requestId): void
+    {
+        self::set(self::REQUEST_ID, $requestId);
+    }
+
+    /**
+     * 获取分布式传递所需的上下文键
+     *
+     * @return array<string>
+     */
+    public static function getDistributedKeys(): array
+    {
+        return [
+            self::TRACE_ID,
+            self::SPAN_ID,
+            self::PARENT_SPAN_ID,
+            self::NODE_ID,
+            self::SOURCE_NODE_ID,
+            self::REQUEST_ID,
+            self::CORRELATION_ID,
+        ];
+    }
+
+    /**
+     * 导出分布式追踪上下文（用于跨节点传递）
+     *
+     * @return array<string, mixed>
+     */
+    public static function exportForDistributed(): array
+    {
+        return self::export(self::getDistributedKeys());
+    }
+
+    /**
+     * 导出为 HTTP Headers 格式
+     *
+     * @param string $prefix Header 前缀，默认 'X-Context-'
+     * @return array<string, string>
+     */
+    public static function toHeaders(string $prefix = 'X-Context-'): array
+    {
+        $headers = [];
+        $data = self::exportForDistributed();
+
+        foreach ($data as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $headers[$prefix . str_replace('_', '-', ucwords($key, '_'))] = (string)$value;
+            }
+        }
+
+        return $headers;
+    }
+
+    /**
+     * 从 HTTP Headers 导入上下文
+     *
+     * @param array<string, string> $headers HTTP Headers
+     * @param string                $prefix  Header 前缀
+     */
+    public static function fromHeaders(array $headers, string $prefix = 'X-Context-'): void
+    {
+        $data = [];
+        $prefixLen = strlen($prefix);
+
+        foreach ($headers as $name => $value) {
+            if (str_starts_with($name, $prefix)) {
+                $key = strtolower(str_replace('-', '_', substr($name, $prefixLen)));
+                $data[$key] = $value;
+            }
+        }
+
+        self::import($data, true);
+    }
+
+    /**
+     * 实现 JsonSerializable 接口
+     *
+     * @return array<string, mixed>
+     */
+    public function jsonSerialize(): array
+    {
+        return self::export();
+    }
+
+    // ==================== 私有方法 ====================
+
     /**
      * 初始化存储机制
      */
@@ -515,5 +812,97 @@ final class Context
             } catch (Throwable) {
             }
         }
+    }
+
+    /**
+     * 序列化单个值
+     */
+    private static function serializeValue(mixed $value): mixed
+    {
+        if ($value === null || is_scalar($value)) {
+            return $value;
+        }
+
+        if (is_array($value)) {
+            return array_map(self::serializeValue(...), $value);
+        }
+
+        if ($value instanceof \DateTimeInterface) {
+            return [
+                '__type__' => 'datetime',
+                'value' => $value->format(\DateTimeInterface::ATOM),
+            ];
+        }
+
+        if ($value instanceof \BackedEnum) {
+            return [
+                '__type__' => 'enum',
+                'class' => get_class($value),
+                'value' => $value->value,
+            ];
+        }
+
+        if (is_object($value)) {
+            if ($value instanceof JsonSerializable) {
+                return [
+                    '__type__' => 'json_serializable',
+                    'class' => get_class($value),
+                    'value' => $value->jsonSerialize(),
+                ];
+            }
+
+            return [
+                '__type__' => 'object',
+                'class' => get_class($value),
+            ];
+        }
+
+        if (is_resource($value)) {
+            return [
+                '__type__' => 'resource',
+                'type' => get_resource_type($value),
+            ];
+        }
+
+        return $value;
+    }
+
+    /**
+     * 反序列化单个值
+     */
+    private static function unserializeValue(mixed $value): mixed
+    {
+        if (!is_array($value) || !isset($value['__type__'])) {
+            if (is_array($value)) {
+                return array_map(self::unserializeValue(...), $value);
+            }
+            return $value;
+        }
+
+        return match ($value['__type__']) {
+            'datetime' => new \DateTimeImmutable($value['value']),
+            'enum' => class_exists($value['class'])
+                ? ($value['class'])::from($value['value'])
+                : $value['value'],
+            'object', 'json_serializable' => $value['value'] ?? null,
+            'resource' => null,
+            default => $value['value'] ?? $value,
+        };
+    }
+
+    /**
+     * 生成 Trace ID
+     */
+    private static function generateTraceId(): string
+    {
+        return bin2hex(random_bytes(16));
+    }
+
+    /**
+     * 生成 Span ID
+     */
+    private static function generateSpanId(): string
+    {
+        return bin2hex(random_bytes(8));
     }
 }

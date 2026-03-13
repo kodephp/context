@@ -1,10 +1,10 @@
 {
     "name": "kode/context",
-    "description": "A lightweight, high-performance context management library for PHP coroutine/fiber environments",
-    "keywords": ["context", "coroutine", "fiber", "swoole", "swow", "request-context", "php8"],
+    "description": "A lightweight, high-performance context management library for PHP coroutine/fiber environments with distributed support",
+    "keywords": ["context", "coroutine", "fiber", "swoole", "swow", "request-context", "php8", "distributed", "tracing"],
     "homepage": "https://github.com/kodephp/context",
     "license": "Apache-2.0",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "authors": [
         {
             "name": "KodePHP",
