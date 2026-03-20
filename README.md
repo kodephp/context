@@ -16,6 +16,8 @@
 
 - ✅ Fiber 中 `static` 变量被共享导致的数据污染
 - ✅ Swoole/Swow 协程间上下文隔离问题
+- ✅ 多进程（pcntl_fork）上下文继承与隔离
+- ✅ 多线程（ZTS + pthreads/parallel）上下文隔离
 - ✅ 支持透明传递请求上下文（如：`user`, `request`, `trace_id`）
 - ✅ 提供与 Go `context.Context` 类似的语义模型
 - ✅ 兼容原生 PHP、Fiber（PHP 8.3+）、Swoole、Swow 等多种运行时环境
@@ -88,6 +90,8 @@ Context::clear();
 | **PHP Fiber (8.3+)** | `\Fiber::getLocal()` | 使用 Fiber 内建本地存储，完美隔离 |
 | **Swoole** | `Co::getCid()` + `Coroutine::getContext()` | 基于协程 ID 绑定上下文对象 |
 | **Swow** | `Swow\Coroutine::getLocal()` | 使用 Swow 提供的本地存储 API |
+| **多线程 (ZTS)** | 线程 ID + 独立存储 | 支持 pthreads/parallel 扩展 |
+| **多进程** | 进程 ID + fork 继承 | 支持 pcntl_fork |
 | **普通同步环境** | `$GLOBALS` 模拟 | 单线程安全，兼容 CLI/HTTP |
 
 > ✅ 所有实现均保证：**每个并发执行单元拥有独立的上下文视图**
@@ -164,6 +168,139 @@ $http->on('request', function ($req, $resp) {
         $resp->end('Server Error');
     }
 });
+```
+
+---
+
+## 🔀 多进程支持
+
+`kode/context` 提供完整的多进程上下文管理支持，适用于使用 `pcntl_fork()` 的场景。
+
+### Fork 上下文继承
+
+```php
+use Kode\Context\Context;
+
+// 设置父进程上下文
+Context::set('user_id', 123);
+Context::set('trace_id', 'abc-123');
+
+// 准备 fork
+Context::prepareFork();
+
+$pid = pcntl_fork();
+
+if ($pid === 0) {
+    // 子进程：继承父进程上下文
+    Context::afterFork(true);
+    
+    echo Context::get('user_id'); // 123
+    echo Context::get('trace_id'); // 'abc-123'
+    
+    // 子进程的修改不影响父进程
+    Context::set('user_id', 456);
+    
+    exit(0);
+} else {
+    // 父进程
+    pcntl_wait($status);
+    
+    echo Context::get('user_id'); // 仍然是 123
+}
+```
+
+### 进程池并行执行
+
+```php
+use Kode\Context\Context;
+
+// 设置共享上下文
+Context::set('config', $config);
+
+// 定义任务
+$tasks = [
+    'task1' => fn() => processUserData($users1),
+    'task2' => fn() => processUserData($users2),
+    'task3' => fn() => generateReport($data),
+];
+
+// 并行执行（最大 4 个进程）
+$results = Context::parallelProcesses($tasks, maxProcesses: 4, inheritContext: true);
+
+// 获取结果
+print_r($results['task1']);
+print_r($results['task2']);
+print_r($results['task3']);
+```
+
+### 进程间通信
+
+进程间通过 socket 传递序列化数据：
+
+```php
+// parallelProcesses 自动处理进程间通信
+$results = Context::parallelProcesses([
+    'heavy_task' => fn() => [
+        'status' => 'success',
+        'data' => $computedData,
+    ],
+]);
+```
+
+---
+
+## 🧵 多线程支持
+
+`kode/context` 支持多线程环境（需要 ZTS + pthreads 或 parallel 扩展）。
+
+### 检测线程环境
+
+```php
+use Kode\Context\Context;
+
+if (Context::isThread()) {
+    echo "运行在多线程环境中";
+}
+
+$threadId = Context::getThreadId();
+```
+
+### 线程中运行任务
+
+```php
+use Kode\Context\Context;
+
+// 设置共享上下文
+Context::set('shared_data', $data);
+
+// 在新线程中运行（继承上下文）
+$thread = Context::runInThread(function () {
+    // 可以访问共享上下文
+    $data = Context::get('shared_data');
+    return processInThread($data);
+}, inheritContext: true);
+
+// 等待结果（pthreads）
+$thread->join();
+$result = $thread->result;
+
+// 或 parallel 扩展
+// $result = $thread->value();
+```
+
+### 线程池并行执行
+
+```php
+use Kode\Context\Context;
+
+$tasks = [
+    'task1' => fn() => computeTask1(),
+    'task2' => fn() => computeTask2(),
+    'task3' => fn() => computeTask3(),
+];
+
+// 并行执行（最大 4 个线程）
+$results = Context::parallelThreads($tasks, maxThreads: 4, inheritContext: true);
 ```
 
 ---
@@ -265,131 +402,121 @@ $result = Fibers::scheduleDistributedRemote(
 
 ### 基础操作
 
-#### `Context::set(string $key, mixed $value): void`
-设置当前上下文中的值。
-
-#### `Context::get(string $key, mixed $default = null): mixed`
-获取指定键的值，不存在则返回默认值。
-
-#### `Context::has(string $key): bool`
-判断键是否存在。
-
-#### `Context::delete(string $key): void`
-删除指定键。
-
-#### `Context::clear(): void`
-清空当前上下文所有数据。
+| 方法 | 说明 |
+|------|------|
+| `Context::set(string $key, mixed $value): void` | 设置上下文值 |
+| `Context::get(string $key, mixed $default = null): mixed` | 获取上下文值 |
+| `Context::has(string $key): bool` | 判断键是否存在 |
+| `Context::delete(string $key): void` | 删除指定键 |
+| `Context::clear(): void` | 清空当前上下文 |
 
 ### 批量操作
 
-#### `Context::copy(): array`
-复制当前上下文为数组快照（用于调试或传递）。
-
-#### `Context::restore(array $snapshot): void`
-从快照恢复上下文。
-
-#### `Context::merge(array $data, bool $overwrite = true): void`
-将数组合并到当前上下文中。
-
-#### `Context::keys(): array`
-获取当前上下文中的所有键名。
-
-#### `Context::count(): int`
-获取当前上下文中的键值对数量。
-
-#### `Context::all(): array`
-获取当前上下文中的所有数据。
+| 方法 | 说明 |
+|------|------|
+| `Context::copy(): array` | 复制当前上下文为数组快照 |
+| `Context::restore(array $snapshot): void` | 从快照恢复上下文 |
+| `Context::merge(array $data, bool $overwrite = true): void` | 合并数据到上下文 |
+| `Context::keys(): array` | 获取所有键名 |
+| `Context::count(): int` | 获取键值对数量 |
+| `Context::all(): array` | 获取所有数据 |
 
 ### 作用域操作
 
-#### `Context::run(callable $callable): mixed`
-在新的上下文作用域中执行 `$callable`，结束后自动回滚到之前的状态。
-
-> 💡 类似于事务式的上下文操作，避免副作用泄漏。新作用域中无法访问外部上下文。
-
-#### `Context::fork(callable $callable): mixed`
-在继承当前上下文的新作用域中执行 `$callable`，结束后自动回滚。
-
-> 💡 与 `run()` 不同，`fork()` 会复制当前上下文到新作用域，可以访问外部上下文。
+| 方法 | 说明 |
+|------|------|
+| `Context::run(callable $callable): mixed` | 在隔离作用域中执行 |
+| `Context::fork(callable $callable): mixed` | 在继承作用域中执行 |
 
 ### 类型安全
 
-#### `Context::getOfType(string $key, string $type): mixed`
-获取指定键的值并断言类型。
-
-```php
-$user = Context::getOfType('user', User::class);
-// 如果值不存在或类型不匹配，抛出 ContextException
-```
+| 方法 | 说明 |
+|------|------|
+| `Context::getOfType(string $key, string $type): mixed` | 获取并断言类型 |
 
 ### 监听器
 
-#### `Context::listen(string $key, Closure $listener): void`
-注册上下文变更监听器。
-
-```php
-Context::listen('user_id', function (string $key, mixed $oldValue, mixed $newValue) {
-    Log::info("用户ID变更: {$oldValue} -> {$newValue}");
-});
-```
-
-#### `Context::unlisten(string $key): void`
-移除上下文变更监听器。
+| 方法 | 说明 |
+|------|------|
+| `Context::listen(string $key, Closure $listener): void` | 注册变更监听器 |
+| `Context::unlisten(string $key): void` | 移除监听器 |
 
 ### 运行时信息
 
-#### `Context::getRuntime(): string`
-获取当前运行时类型，返回以下常量之一：
-- `Context::RUNTIME_FIBER` - PHP Fiber 环境
-- `Context::RUNTIME_SWOOLE` - Swoole 协程环境
-- `Context::RUNTIME_SWOW` - Swow 协程环境
-- `Context::RUNTIME_SYNC` - 同步模式
+| 方法 | 说明 |
+|------|------|
+| `Context::getRuntime(): string` | 获取运行时类型 |
+| `Context::isCoroutine(): bool` | 是否在协程环境 |
+| `Context::isThread(): bool` | 是否在线程环境 |
+| `Context::isProcess(): bool` | 是否在进程环境 |
+| `Context::getExecutionId(): int\|string\|null` | 获取执行单元 ID |
+| `Context::getCoroutineId(): int\|string\|null` | 获取协程 ID |
+| `Context::getProcessId(): int` | 获取进程 ID |
+| `Context::getThreadId(): ?int` | 获取线程 ID |
 
-#### `Context::isCoroutine(): bool`
-检查是否在协程/Fiber环境中运行。
+### 多进程操作
 
-#### `Context::getCoroutineId(): int|string|null`
-获取当前协程/Fiber ID，同步模式下返回 null。
+| 方法 | 说明 |
+|------|------|
+| `Context::prepareFork(): void` | 准备 fork 前的上下文快照 |
+| `Context::afterFork(bool $inherit = true): void` | fork 后初始化子进程上下文 |
+| `Context::runInProcess(callable $task, bool $inherit = true): mixed` | 在子进程中运行任务 |
+| `Context::parallelProcesses(array $tasks, int $max = 4, bool $inherit = true): array` | 进程池并行执行 |
+
+### 多线程操作
+
+| 方法 | 说明 |
+|------|------|
+| `Context::runInThread(callable $task, bool $inherit = true): mixed` | 在线程中运行任务 |
+| `Context::parallelThreads(array $tasks, int $max = 4, bool $inherit = true): array` | 线程池并行执行 |
 
 ### 分布式操作
 
-#### `Context::toJson(array $onlyKeys = []): string`
-序列化上下文为 JSON 字符串。
-
-#### `Context::fromJson(string $json, bool $merge = false): array`
-从 JSON 字符串反序列化上下文。
-
-#### `Context::export(array $onlyKeys = []): array`
-导出可序列化的上下文数据。
-
-#### `Context::import(array $data, bool $merge = false): array`
-导入上下文数据。
-
-#### `Context::startTrace(?string $traceId = null, ?string $nodeId = null): string`
-创建分布式追踪上下文。
-
-#### `Context::startSpan(): string`
-创建子 Span。
-
-#### `Context::getTraceInfo(): array`
-获取追踪信息。
-
-#### `Context::toHeaders(string $prefix = 'X-Context-'): array`
-导出为 HTTP Headers 格式。
-
-#### `Context::fromHeaders(array $headers, string $prefix = 'X-Context-'): void`
-从 HTTP Headers 导入上下文。
-
-#### `Context::getDistributedKeys(): array`
-获取分布式传递所需的上下文键。
-
-#### `Context::exportForDistributed(): array`
-导出分布式追踪上下文。
+| 方法 | 说明 |
+|------|------|
+| `Context::toJson(array $onlyKeys = []): string` | 序列化为 JSON |
+| `Context::fromJson(string $json, bool $merge = false): array` | 从 JSON 反序列化 |
+| `Context::export(array $onlyKeys = []): array` | 导出可序列化数据 |
+| `Context::import(array $data, bool $merge = false): array` | 导入数据 |
+| `Context::startTrace(?string $traceId = null, ?string $nodeId = null): string` | 启动追踪 |
+| `Context::startSpan(): string` | 创建子 Span |
+| `Context::getTraceInfo(): array` | 获取追踪信息 |
+| `Context::toHeaders(string $prefix = 'X-Context-'): array` | 导出为 Headers |
+| `Context::fromHeaders(array $headers, string $prefix = 'X-Context-'): void` | 从 Headers 导入 |
+| `Context::getDistributedKeys(): array` | 获取分布式键 |
+| `Context::exportForDistributed(): array` | 导出分布式上下文 |
 
 ### 测试辅助
 
-#### `Context::reset(): void`
-重置上下文状态（主要用于测试）。
+| 方法 | 说明 |
+|------|------|
+| `Context::reset(): void` | 重置上下文状态 |
+
+### 常量
+
+```php
+// 运行时类型
+Context::RUNTIME_FIBER    // 'fiber'
+Context::RUNTIME_SWOOLE   // 'swoole'
+Context::RUNTIME_SWOW     // 'swow'
+Context::RUNTIME_THREAD   // 'thread'
+Context::RUNTIME_PROCESS  // 'process'
+Context::RUNTIME_SYNC     // 'sync'
+
+// 分布式追踪键
+Context::TRACE_ID         // 'trace_id'
+Context::SPAN_ID          // 'span_id'
+Context::PARENT_SPAN_ID   // 'parent_span_id'
+Context::NODE_ID          // 'node_id'
+Context::SOURCE_NODE_ID   // 'source_node_id'
+Context::REQUEST_ID       // 'request_id'
+Context::CORRELATION_ID   // 'correlation_id'
+
+// 进程/线程键
+Context::PROCESS_ID       // 'process_id'
+Context::THREAD_ID        // 'thread_id'
+Context::PARENT_PROCESS_ID // 'parent_process_id'
+```
 
 ---
 
@@ -417,7 +544,9 @@ Context::listen('user_id', function (string $key, mixed $oldValue, mixed $newVal
 - ORM 连接上下文（如 Tenant ID）
 - AOP 拦截器中共享临时数据
 - 替代 Facade 模式中的全局状态
-- **分布式任务调度与上下文传递**
+- 多进程任务并行处理
+- 多线程计算密集型任务
+- 分布式任务调度与上下文传递
 
 ---
 
@@ -428,6 +557,8 @@ Context::listen('user_id', function (string $key, mixed $oldValue, mixed $newVal
 - 不应在上下文中保存资源句柄（如文件描述符、数据库连接）
 - Fiber 下注意闭包绑定问题（`$this` 上下文可能不同）
 - 分布式传递时，对象会被序列化，资源句柄和闭包无法传递
+- 多进程功能需要 pcntl 扩展
+- 多线程功能需要 ZTS + pthreads 或 parallel 扩展
 
 ---
 
@@ -495,43 +626,6 @@ Context::listen('user_id', function (string $key, mixed $oldValue, mixed $newVal
 ```bash
 composer run benchmark
 ```
-
----
-
-## 🆕 版本更新
-
-### v2.1.0
-
-**新功能：**
-- 新增分布式上下文传递支持
-- 新增 `Context::toJson()` / `Context::fromJson()` 序列化方法
-- 新增 `Context::export()` / `Context::import()` 导入导出方法
-- 新增 `Context::startTrace()` / `Context::startSpan()` 分布式追踪
-- 新增 `Context::toHeaders()` / `Context::fromHeaders()` HTTP Headers 传递
-- 新增 `Context::getDistributedKeys()` / `Context::exportForDistributed()` 分布式键管理
-- 实现 `JsonSerializable` 接口
-
-**改进：**
-- 支持 DateTime、Enum、JsonSerializable 对象的序列化
-- 完善分布式追踪信息管理
-
-### v2.0.0
-
-**新功能：**
-- 新增 `Context::fork()` 方法，支持继承当前上下文
-- 新增 `Context::restore()` 方法，支持从快照恢复上下文
-- 新增 `Context::getOfType()` 方法，支持类型安全获取
-- 新增 `Context::listen()` / `Context::unlisten()` 监听器机制
-- 新增 `Context::getRuntime()` / `Context::isCoroutine()` / `Context::getCoroutineId()` 运行时检测方法
-- 新增 `Context::reset()` 测试辅助方法
-- 新增 `ContextException` 异常类
-
-**改进：**
-- 使用 `final` 类防止继承
-- 使用 PHP 8.1+ 新特性（如 `mixed` 类型、命名参数等）
-- 兼容 PHP 8.5 新特性
-- 优化 Fiber 存储机制
-- 完善测试覆盖率
 
 ---
 
