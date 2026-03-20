@@ -14,9 +14,15 @@ use JsonSerializable;
 /**
  * 上下文管理类
  *
- * 为多线程、多进程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制。
+ * 为多进程、多线程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制。
  * 支持 PHP 8.1+ 并兼容 PHP 8.5 新特性。
  * 支持分布式多机器部署场景的上下文序列化和传递。
+ *
+ * 支持的运行环境：
+ * - 多进程（pcntl_fork、进程池）
+ * - 多线程（ZTS + pthreads/parallel）
+ * - 协程（Swoole、Swow、PHP Fiber）
+ * - 同步模式
  *
  * @package Kode\Context
  * @author  KodePHP <382601296@qq.com>
@@ -42,6 +48,11 @@ final class Context implements JsonSerializable
     private static ?string $runtime = null;
 
     /**
+     * 当前进程/线程/协程 ID
+     */
+    private static int|string|null $executionId = null;
+
+    /**
      * 上下文栈，用于嵌套 run() 调用
      *
      * @var array<int, array<string, mixed>|null>
@@ -56,6 +67,25 @@ final class Context implements JsonSerializable
     private static array $listeners = [];
 
     /**
+     * 进程级上下文存储（用于 fork 后继承）
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private static array $processContexts = [];
+
+    /**
+     * 线程级上下文存储（用于 ZTS 环境）
+     *
+     * @var array<int, array<string, mixed>>
+     */
+    private static array $threadContexts = [];
+
+    /**
+     * 是否在 fork 后状态
+     */
+    private static bool $postFork = false;
+
+    /**
      * 分布式追踪相关键名
      */
     public const TRACE_ID = 'trace_id';
@@ -65,6 +95,9 @@ final class Context implements JsonSerializable
     public const SOURCE_NODE_ID = 'source_node_id';
     public const REQUEST_ID = 'request_id';
     public const CORRELATION_ID = 'correlation_id';
+    public const PROCESS_ID = 'process_id';
+    public const THREAD_ID = 'thread_id';
+    public const PARENT_PROCESS_ID = 'parent_process_id';
 
     /**
      * 运行时类型常量
@@ -72,6 +105,8 @@ final class Context implements JsonSerializable
     public const RUNTIME_FIBER = 'fiber';
     public const RUNTIME_SWOOLE = 'swoole';
     public const RUNTIME_SWOW = 'swow';
+    public const RUNTIME_THREAD = 'thread';
+    public const RUNTIME_PROCESS = 'process';
     public const RUNTIME_SYNC = 'sync';
 
     /**
@@ -341,16 +376,29 @@ final class Context implements JsonSerializable
             return self::$runtime;
         }
 
+        // 检查 Fiber
         if (PHP_VERSION_ID >= 80300 && class_exists(Fiber::class) && Fiber::getCurrent() !== null) {
             return self::$runtime = self::RUNTIME_FIBER;
         }
 
+        // 检查 Swoole 协程
         if (extension_loaded('swoole') && self::isSwooleCoroutine()) {
             return self::$runtime = self::RUNTIME_SWOOLE;
         }
 
+        // 检查 Swow 协程
         if (extension_loaded('swow') && self::isSwowCoroutine()) {
             return self::$runtime = self::RUNTIME_SWOW;
+        }
+
+        // 检查多线程环境 (ZTS + pthreads/parallel)
+        if (self::isThreadEnvironment()) {
+            return self::$runtime = self::RUNTIME_THREAD;
+        }
+
+        // 检查多进程环境
+        if (self::isProcessEnvironment()) {
+            return self::$runtime = self::RUNTIME_PROCESS;
         }
 
         return self::$runtime = self::RUNTIME_SYNC;
@@ -363,28 +411,93 @@ final class Context implements JsonSerializable
      */
     public static function isCoroutine(): bool
     {
-        return self::getRuntime() !== self::RUNTIME_SYNC;
+        $runtime = self::getRuntime();
+        return $runtime === self::RUNTIME_FIBER 
+            || $runtime === self::RUNTIME_SWOOLE 
+            || $runtime === self::RUNTIME_SWOW;
     }
 
     /**
-     * 获取当前协程/Fiber ID
+     * 检查是否在多线程环境中运行
      *
-     * @return int|string|null 返回协程ID，同步模式下返回null
+     * @return bool
+     */
+    public static function isThread(): bool
+    {
+        return self::getRuntime() === self::RUNTIME_THREAD;
+    }
+
+    /**
+     * 检查是否在多进程环境中运行
+     *
+     * @return bool
+     */
+    public static function isProcess(): bool
+    {
+        return self::getRuntime() === self::RUNTIME_PROCESS;
+    }
+
+    /**
+     * 获取当前协程/Fiber/线程/进程 ID
+     *
+     * @return int|string|null
+     */
+    public static function getExecutionId(): int|string|null
+    {
+        if (self::$executionId !== null) {
+            return self::$executionId;
+        }
+
+        $id = match (self::getRuntime()) {
+            self::RUNTIME_FIBER => self::getFiberId(),
+            self::RUNTIME_SWOOLE => self::getSwooleCoroutineId(),
+            self::RUNTIME_SWOW => self::getSwowCoroutineId(),
+            self::RUNTIME_THREAD => self::getThreadId(),
+            self::RUNTIME_PROCESS => getmypid() ?: null,
+            default => null,
+        };
+
+        return self::$executionId = $id;
+    }
+
+    /**
+     * 获取当前协程/Fiber ID（兼容旧 API）
+     *
+     * @return int|string|null
      */
     public static function getCoroutineId(): int|string|null
     {
-        $runtime = self::getRuntime();
-        if ($runtime === self::RUNTIME_FIBER) {
-            $fiber = Fiber::getCurrent();
-            return $fiber !== null ? spl_object_id($fiber) : null;
+        return self::getExecutionId();
+    }
+
+    /**
+     * 获取当前进程 ID
+     *
+     * @return int
+     */
+    public static function getProcessId(): int
+    {
+        return getmypid();
+    }
+
+    /**
+     * 获取当前线程 ID（如果支持）
+     *
+     * @return int|null
+     */
+    public static function getThreadId(): ?int
+    {
+        // pthreads 扩展
+        if (class_exists(\Thread::class) && method_exists(\Thread::class, 'getCurrentThreadId')) {
+            return \Thread::getCurrentThreadId();
         }
-        if ($runtime === self::RUNTIME_SWOOLE) {
-            /** @phpstan-ignore-next-line */
-            return \Swoole\Coroutine::getCid();
+
+        // parallel 扩展
+        if (function_exists('parallel\\Runtime')) {
+            // parallel 没有直接的线程 ID 获取方法
+            return spl_object_id(new \stdClass());
         }
-        if ($runtime === self::RUNTIME_SWOW) {
-            return self::getSwowCoroutineId();
-        }
+
         return null;
     }
 
@@ -398,8 +511,381 @@ final class Context implements JsonSerializable
         self::$local = [];
         self::$initialized = false;
         self::$runtime = null;
+        self::$executionId = null;
         self::$contextStack = [];
         self::$listeners = [];
+        self::$processContexts = [];
+        self::$threadContexts = [];
+        self::$postFork = false;
+    }
+
+    // ==================== 多进程支持 ====================
+
+    /**
+     * 在 fork 后初始化子进程上下文
+     *
+     * 应该在 pcntl_fork() 后的子进程中调用
+     *
+     * @param bool $inheritParentContext 是否继承父进程的上下文，默认为 true
+     */
+    public static function afterFork(bool $inheritParentContext = true): void
+    {
+        $parentPid = self::get(self::PARENT_PROCESS_ID);
+
+        if ($inheritParentContext && $parentPid !== null) {
+            // 从父进程继承上下文
+            $snapshot = self::$processContexts[$parentPid] ?? [];
+            if (!empty($snapshot)) {
+                self::$local = [...$snapshot];
+            }
+        } else {
+            // 清空上下文，开始新的上下文
+            self::$local = [];
+        }
+
+        // 设置当前进程 ID
+        self::set(self::PROCESS_ID, getmypid());
+
+        // 重置运行时检测
+        self::$runtime = null;
+        self::$executionId = null;
+        self::$initialized = true;
+        self::$postFork = true;
+    }
+
+    /**
+     * 准备 fork 前的上下文快照
+     *
+     * 在调用 pcntl_fork() 之前调用此方法
+     */
+    public static function prepareFork(): void
+    {
+        self::initStorage();
+        self::set(self::PARENT_PROCESS_ID, getmypid());
+
+        // 保存当前上下文快照
+        self::$processContexts[getmypid()] = self::$local;
+    }
+
+    /**
+     * 在子进程中运行任务
+     *
+     * @template T
+     * @param callable(): T $task              任务回调
+     * @param bool          $inheritContext    是否继承父进程上下文
+     * @return T|null 返回任务结果，如果 fork 失败返回 null
+     */
+    public static function runInProcess(callable $task, bool $inheritContext = true): mixed
+    {
+        if (!function_exists('pcntl_fork')) {
+            throw new ContextException('pcntl 扩展未安装，无法使用多进程功能');
+        }
+
+        self::prepareFork();
+
+        $pid = pcntl_fork();
+
+        if ($pid === -1) {
+            throw new ContextException('fork 失败');
+        }
+
+        if ($pid === 0) {
+            // 子进程
+            self::afterFork($inheritContext);
+            try {
+                $result = $task();
+                exit(0);
+            } catch (Throwable $e) {
+                exit(1);
+            }
+        }
+
+        // 父进程
+        return null;
+    }
+
+    /**
+     * 使用进程池执行多个任务
+     *
+     * @param array<callable> $tasks          任务数组
+     * @param int             $maxProcesses   最大进程数
+     * @param bool            $inheritContext 是否继承父进程上下文
+     * @return array 任务结果数组
+     */
+    public static function parallelProcesses(array $tasks, int $maxProcesses = 4, bool $inheritContext = true): array
+    {
+        if (!function_exists('pcntl_fork')) {
+            throw new ContextException('pcntl 扩展未安装，无法使用多进程功能');
+        }
+
+        self::prepareFork();
+        $results = [];
+        $pids = [];
+        $pipes = [];
+
+        foreach ($tasks as $key => $task) {
+            // 创建管道用于进程间通信
+            $pipe = [];
+            if (!socket_create_pair(AF_UNIX, SOCK_STREAM, 0, $pipe)) {
+                throw new ContextException('创建 socket 对失败');
+            }
+
+            $pid = pcntl_fork();
+
+            if ($pid === -1) {
+                throw new ContextException("fork 任务 {$key} 失败");
+            }
+
+            if ($pid === 0) {
+                // 子进程
+                socket_close($pipe[0]);
+                self::afterFork($inheritContext);
+
+                try {
+                    $result = $task();
+                    $serialized = serialize($result);
+                    socket_write($pipe[1], $serialized);
+                    socket_close($pipe[1]);
+                    exit(0);
+                } catch (Throwable $e) {
+                    $error = serialize(['__error__' => $e->getMessage()]);
+                    socket_write($pipe[1], $error);
+                    socket_close($pipe[1]);
+                    exit(1);
+                }
+            }
+
+            // 父进程
+            socket_close($pipe[1]);
+            $pids[$key] = $pid;
+            $pipes[$key] = $pipe[0];
+
+            // 控制并发进程数
+            while (count($pids) >= $maxProcesses) {
+                $status = 0;
+                $finishedPid = pcntl_wait($status);
+                if ($finishedPid > 0) {
+                    foreach ($pids as $key => $pid) {
+                        if ($pid === $finishedPid) {
+                            // 读取结果
+                            $data = '';
+                            while ($chunk = socket_read($pipes[$key], 4096)) {
+                                $data .= $chunk;
+                            }
+                            socket_close($pipes[$key]);
+                            $results[$key] = unserialize($data);
+                            unset($pids[$key], $pipes[$key]);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 等待所有子进程完成
+        foreach ($pids as $key => $pid) {
+            pcntl_waitpid($pid, $status);
+            $data = '';
+            while ($chunk = socket_read($pipes[$key], 4096)) {
+                $data .= $chunk;
+            }
+            socket_close($pipes[$key]);
+            $results[$key] = unserialize($data);
+        }
+
+        return $results;
+    }
+
+    // ==================== 多线程支持 ====================
+
+    /**
+     * 检查是否在多线程环境中
+     *
+     * @return bool
+     */
+    private static function isThreadEnvironment(): bool
+    {
+        // 检查 ZTS (Zend Thread Safety)
+        if (!defined('ZEND_THREAD_SAFE') || !ZEND_THREAD_SAFE) {
+            return false;
+        }
+
+        // 检查 pthreads 扩展
+        if (class_exists(\Thread::class)) {
+            return true;
+        }
+
+        // 检查 parallel 扩展
+        if (extension_loaded('parallel')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 检查是否在多进程环境中
+     *
+     * @return bool
+     */
+    private static function isProcessEnvironment(): bool
+    {
+        // 如果有 pcntl 扩展且不是协程/线程环境，则认为是进程环境
+        // 注意：这里不能调用 isCoroutine() 或 isThreadEnvironment()，因为它们会调用 getRuntime()
+        // 而 getRuntime() 又会调用此方法，导致无限递归
+        if (!function_exists('pcntl_fork')) {
+            return false;
+        }
+
+        // 检查是否在协程中
+        if (PHP_VERSION_ID >= 80300 && class_exists(Fiber::class) && Fiber::getCurrent() !== null) {
+            return false;
+        }
+
+        if (extension_loaded('swoole') && \Swoole\Coroutine::getCid() !== -1) {
+            return false;
+        }
+
+        if (extension_loaded('swow') && class_exists(\Swow\Coroutine::class) && \Swow\Coroutine::getCurrent() !== null) {
+            return false;
+        }
+
+        // 检查是否在线程中
+        if (self::isThreadEnvironment()) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 在新线程中运行任务（需要 pthreads 或 parallel 扩展）
+     *
+     * @template T
+     * @param callable(): T $task           任务回调
+     * @param bool          $inheritContext 是否继承当前线程上下文
+     * @return mixed 返回线程对象或 Future
+     */
+    public static function runInThread(callable $task, bool $inheritContext = true): mixed
+    {
+        $contextSnapshot = $inheritContext ? self::copy() : [];
+
+        // pthreads 扩展
+        if (class_exists(\Thread::class)) {
+            $thread = new class($task, $contextSnapshot) extends \Thread {
+                private $task;
+                private array $context;
+                public mixed $result;
+
+                public function __construct(callable $task, array $context)
+                {
+                    $this->task = $task;
+                    $this->context = $context;
+                }
+
+                public function run(): void
+                {
+                    Context::restore($this->context);
+                    $this->result = ($this->task)();
+                }
+            };
+            $thread->start();
+            return $thread;
+        }
+
+        // parallel 扩展
+        if (extension_loaded('parallel')) {
+            $runtime = new \parallel\Runtime();
+            return $runtime->run(function () use ($task, $contextSnapshot) {
+                Context::restore($contextSnapshot);
+                return $task();
+            });
+        }
+
+        throw new ContextException('没有可用的多线程扩展（pthreads 或 parallel）');
+    }
+
+    /**
+     * 使用线程池执行多个任务
+     *
+     * @param array<callable> $tasks          任务数组
+     * @param int             $maxThreads     最大线程数
+     * @param bool            $inheritContext 是否继承当前线程上下文
+     * @return array 任务结果数组
+     */
+    public static function parallelThreads(array $tasks, int $maxThreads = 4, bool $inheritContext = true): array
+    {
+        // parallel 扩展
+        if (extension_loaded('parallel')) {
+            $contextSnapshot = $inheritContext ? self::copy() : [];
+            $runtime = new \parallel\Runtime();
+            $futures = [];
+
+            foreach ($tasks as $key => $task) {
+                $futures[$key] = $runtime->run(function () use ($task, $contextSnapshot) {
+                    Context::restore($contextSnapshot);
+                    return $task();
+                });
+            }
+
+            $results = [];
+            foreach ($futures as $key => $future) {
+                $results[$key] = $future->value();
+            }
+
+            return $results;
+        }
+
+        // pthreads 扩展
+        if (class_exists(\Thread::class)) {
+            $contextSnapshot = $inheritContext ? self::copy() : [];
+            $threads = [];
+
+            foreach ($tasks as $key => $task) {
+                $thread = new class($task, $contextSnapshot) extends \Thread {
+                    private $task;
+                    private array $context;
+                    public mixed $result;
+
+                    public function __construct(callable $task, array $context)
+                    {
+                        $this->task = $task;
+                        $this->context = $context;
+                    }
+
+                    public function run(): void
+                    {
+                        Context::restore($this->context);
+                        $this->result = ($this->task)();
+                    }
+                };
+                $thread->start();
+                $threads[$key] = $thread;
+
+                // 控制并发线程数
+                while (count($threads) >= $maxThreads) {
+                    foreach ($threads as $k => $t) {
+                        if (!$t->isRunning()) {
+                            $t->join();
+                            unset($threads[$k]);
+                            break;
+                        }
+                    }
+                    usleep(1000);
+                }
+            }
+
+            // 等待所有线程完成
+            $results = [];
+            foreach ($threads as $key => $thread) {
+                $thread->join();
+                $results[$key] = $thread->result;
+            }
+
+            return $results;
+        }
+
+        throw new ContextException('没有可用的多线程扩展（pthreads 或 parallel）');
     }
 
     // ==================== 分布式支持 ====================
@@ -695,6 +1181,7 @@ final class Context implements JsonSerializable
             return;
         }
 
+        // 优先检查 Fiber
         if (PHP_VERSION_ID >= 80300 && class_exists(Fiber::class)) {
             $fiber = Fiber::getCurrent();
             if ($fiber !== null) {
@@ -704,6 +1191,7 @@ final class Context implements JsonSerializable
             }
         }
 
+        // 检查 Swoole 协程
         if (extension_loaded('swoole')) {
             $cid = \Swoole\Coroutine::getCid();
             if ($cid !== -1) {
@@ -717,6 +1205,7 @@ final class Context implements JsonSerializable
             }
         }
 
+        // 检查 Swow 协程
         if (extension_loaded('swow') && class_exists(\Swow\Coroutine::class)) {
             $co = \Swow\Coroutine::getCurrent();
             if ($co !== null) {
@@ -730,6 +1219,14 @@ final class Context implements JsonSerializable
             }
         }
 
+        // 检查多线程环境
+        if (self::isThreadEnvironment()) {
+            self::initThreadStorage();
+            self::$initialized = true;
+            return;
+        }
+
+        // 默认使用全局存储
         if (!isset($GLOBALS['__kode_context'])) {
             $GLOBALS['__kode_context'] = [];
         }
@@ -773,6 +1270,24 @@ final class Context implements JsonSerializable
     }
 
     /**
+     * 初始化线程存储
+     */
+    private static function initThreadStorage(): void
+    {
+        $threadId = self::getThreadId();
+
+        if ($threadId === null) {
+            return;
+        }
+
+        if (!isset(self::$threadContexts[$threadId])) {
+            self::$threadContexts[$threadId] = [];
+        }
+
+        self::$local = &self::$threadContexts[$threadId];
+    }
+
+    /**
      * 检查是否在 Swoole 协程中
      */
     private static function isSwooleCoroutine(): bool
@@ -786,6 +1301,24 @@ final class Context implements JsonSerializable
     private static function isSwowCoroutine(): bool
     {
         return class_exists(\Swow\Coroutine::class) && \Swow\Coroutine::getCurrent() !== null;
+    }
+
+    /**
+     * 获取 Fiber ID
+     */
+    private static function getFiberId(): ?int
+    {
+        $fiber = Fiber::getCurrent();
+        return $fiber !== null ? spl_object_id($fiber) : null;
+    }
+
+    /**
+     * 获取 Swoole 协程 ID
+     */
+    private static function getSwooleCoroutineId(): int
+    {
+        /** @phpstan-ignore-next-line */
+        return \Swoole\Coroutine::getCid();
     }
 
     /**

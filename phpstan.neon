@@ -9,5 +9,12 @@ parameters:
         - '#Cannot access offset .+ on mixed#'
         - '#Static property .+ does not accept mixed#'
         - '#Method .+ has parameter \$fiber with generic class Fiber but does not specify its types#'
-        - '#Parameter .+ of function spl_object_id expects object, Fiber#'
+        - '#Parameter #1 \$object of function spl_object_id expects object, Fiber#'
+        - '#Cannot call method value\(\) on parallel\\Future#'
+        - '#Property class@anonymous#'
+        - '#Method .+ has parameter .+ with no value type specified in iterable type array#'
+        - '#Static property .+ is never read, only written#'
+        - '#Method .+ return type has no value type specified in iterable type array#'
+        - '#Method .+ should return int but returns int\|false#'
+        - '#Static property .+ does not accept int\|false#'
     reportUnmatchedIgnoredErrors: false

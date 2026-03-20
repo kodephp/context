@@ -194,6 +194,8 @@ class RuntimeCompatibilityTest extends TestCase
             Context::RUNTIME_FIBER,
             Context::RUNTIME_SWOOLE,
             Context::RUNTIME_SWOW,
+            Context::RUNTIME_THREAD,
+            Context::RUNTIME_PROCESS,
             Context::RUNTIME_SYNC,
         ];
 
@@ -208,10 +210,11 @@ class RuntimeCompatibilityTest extends TestCase
         $isCoroutine = Context::isCoroutine();
         $runtime = Context::getRuntime();
 
-        if ($runtime === Context::RUNTIME_SYNC) {
-            $this->assertFalse($isCoroutine);
-        } else {
+        $coroutineRuntimes = [Context::RUNTIME_FIBER, Context::RUNTIME_SWOOLE, Context::RUNTIME_SWOW];
+        if (in_array($runtime, $coroutineRuntimes, true)) {
             $this->assertTrue($isCoroutine);
+        } else {
+            $this->assertFalse($isCoroutine);
         }
     }
 
@@ -223,7 +226,9 @@ class RuntimeCompatibilityTest extends TestCase
         $id = Context::getCoroutineId();
         $runtime = Context::getRuntime();
 
-        if ($runtime === Context::RUNTIME_SYNC) {
+        // getCoroutineId() 现在是 getExecutionId() 的别名
+        // 在协程环境下返回协程 ID，在进程环境下返回进程 ID
+        if ($runtime === Context::RUNTIME_SYNC || $runtime === Context::RUNTIME_THREAD) {
             $this->assertNull($id);
         } else {
             $this->assertNotNull($id);
