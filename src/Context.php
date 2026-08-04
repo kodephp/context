@@ -6,115 +6,151 @@ namespace Kode\Context;
 
 use Closure;
 use Fiber;
-use ReflectionClass;
-use ReflectionException;
 use Throwable;
-use JsonSerializable;
+use WeakMap;
 
 /**
- * 上下文管理类
+ * 上下文管理器
  *
- * 为多进程、多线程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制。
- * 支持 PHP 8.1+ 并兼容 PHP 8.5 新特性。
- * 支持分布式多机器部署场景的上下文序列化和传递。
+ * 为多进程、多线程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制，
+ * 并支持分布式多机器部署下的上下文透传与链路追踪。
+ *
+ * 核心机制（v3.0 重构）：
+ * 每次读写都会实时解析"当前执行单元"，并从 WeakMap 中取出该单元**独占**的存储对象。
+ * 执行单元销毁后，WeakMap 会自动回收对应上下文，既保证隔离又不会泄漏内存。
  *
  * 支持的运行环境：
+ * - PHP 原生 Fiber（纤程）
+ * - Swoole / Swow 协程
+ * - 多线程（ZTS + parallel）
  * - 多进程（pcntl_fork、进程池）
- * - 多线程（ZTS + pthreads/parallel）
- * - 协程（Swoole、Swow、PHP Fiber）
- * - 同步模式
+ * - 普通同步模式（CLI / FPM）
  *
  * @package Kode\Context
  * @author  KodePHP <382601296@qq.com>
  * @license Apache-2.0
  */
-final class Context implements JsonSerializable
+final class Context
 {
+    // ==================== 常量 ====================
+
+    /** 分布式追踪：链路 ID */
+    public const string TRACE_ID = 'trace_id';
+
+    /** 分布式追踪：当前跨度 ID */
+    public const string SPAN_ID = 'span_id';
+
+    /** 分布式追踪：父跨度 ID */
+    public const string PARENT_SPAN_ID = 'parent_span_id';
+
+    /** 分布式追踪：追踪标志位（W3C trace-flags） */
+    public const string TRACE_FLAGS = 'trace_flags';
+
+    /** 分布式追踪：厂商透传状态（W3C tracestate） */
+    public const string TRACE_STATE = 'trace_state';
+
+    /** 分布式追踪：随行数据（W3C baggage） */
+    public const string BAGGAGE = 'baggage';
+
+    /** 当前节点 ID */
+    public const string NODE_ID = 'node_id';
+
+    /** 来源节点 ID */
+    public const string SOURCE_NODE_ID = 'source_node_id';
+
+    /** 请求 ID */
+    public const string REQUEST_ID = 'request_id';
+
+    /** 关联 ID */
+    public const string CORRELATION_ID = 'correlation_id';
+
+    /** 进程 ID */
+    public const string PROCESS_ID = 'process_id';
+
+    /** 线程 ID */
+    public const string THREAD_ID = 'thread_id';
+
+    /** 父进程 ID */
+    public const string PARENT_PROCESS_ID = 'parent_process_id';
+
+    /** 监听器通配符键名 */
+    public const string WILDCARD = '*';
+
+    /** 运行时：PHP Fiber */
+    public const string RUNTIME_FIBER = 'fiber';
+
+    /** 运行时：Swoole 协程 */
+    public const string RUNTIME_SWOOLE = 'swoole';
+
+    /** 运行时：Swow 协程 */
+    public const string RUNTIME_SWOW = 'swow';
+
+    /** 运行时：多线程 */
+    public const string RUNTIME_THREAD = 'thread';
+
+    /** 运行时：多进程 */
+    public const string RUNTIME_PROCESS = 'process';
+
+    /** 运行时：同步模式 */
+    public const string RUNTIME_SYNC = 'sync';
+
+    // ==================== 内部状态 ====================
+
     /**
-     * 上下文数据存储
+     * 根存储：同步模式、多进程模式以及每个独立线程各自持有一份
+     */
+    private static ?ContextStore $rootStore = null;
+
+    /**
+     * 执行单元 => 存储 的弱引用映射，执行单元销毁后自动回收
      *
-     * @var array<string, mixed>
+     * @var WeakMap<object, ContextStore>|null
      */
-    private static array $local = [];
-
-    /**
-     * 存储是否已初始化标志
-     */
-    private static bool $initialized = false;
-
-    /**
-     * 当前运行时类型
-     */
-    private static ?string $runtime = null;
-
-    /**
-     * 当前进程/线程/协程 ID
-     */
-    private static int|string|null $executionId = null;
-
-    /**
-     * 上下文栈，用于嵌套 run() 调用
-     *
-     * @var array<int, array<string, mixed>|null>
-     */
-    private static array $contextStack = [];
+    private static ?WeakMap $scopedStores = null;
 
     /**
      * 上下文变更监听器
      *
-     * @var array<string, array<Closure>>
+     * @var array<string, array<string, Closure>>
      */
     private static array $listeners = [];
 
     /**
-     * 进程级上下文存储（用于 fork 后继承）
+     * 监听器自增序号
+     */
+    private static int $listenerSeq = 0;
+
+    /**
+     * 进程级上下文快照（用于 fork 后继承）
      *
      * @var array<int, array<string, mixed>>
      */
     private static array $processContexts = [];
 
     /**
-     * 线程级上下文存储（用于 ZTS 环境）
-     *
-     * @var array<int, array<string, mixed>>
+     * 扩展探测缓存
      */
-    private static array $threadContexts = [];
+    private static ?bool $hasSwoole = null;
+
+    private static ?bool $hasSwow = null;
+
+    private static ?bool $hasParallel = null;
 
     /**
-     * 是否在 fork 后状态
+     * 当前线程的稳定标识（statics 在 parallel 中天然按线程隔离）
+     */
+    private static ?int $threadId = null;
+
+    /**
+     * 是否处于 fork 之后的子进程
      */
     private static bool $postFork = false;
 
-    /**
-     * 分布式追踪相关键名
-     */
-    public const TRACE_ID = 'trace_id';
-    public const SPAN_ID = 'span_id';
-    public const PARENT_SPAN_ID = 'parent_span_id';
-    public const NODE_ID = 'node_id';
-    public const SOURCE_NODE_ID = 'source_node_id';
-    public const REQUEST_ID = 'request_id';
-    public const CORRELATION_ID = 'correlation_id';
-    public const PROCESS_ID = 'process_id';
-    public const THREAD_ID = 'thread_id';
-    public const PARENT_PROCESS_ID = 'parent_process_id';
-
-    /**
-     * 运行时类型常量
-     */
-    public const RUNTIME_FIBER = 'fiber';
-    public const RUNTIME_SWOOLE = 'swoole';
-    public const RUNTIME_SWOW = 'swow';
-    public const RUNTIME_THREAD = 'thread';
-    public const RUNTIME_PROCESS = 'process';
-    public const RUNTIME_SYNC = 'sync';
-
-    /**
-     * 私有构造函数，防止实例化
-     */
     private function __construct()
     {
     }
+
+    // ==================== 基础读写 ====================
 
     /**
      * 设置上下文值
@@ -124,74 +160,63 @@ final class Context implements JsonSerializable
      */
     public static function set(string $key, mixed $value): void
     {
-        self::initStorage();
-        $oldValue = self::$local[$key] ?? null;
-        self::$local[$key] = $value;
+        $store = self::store();
+        $oldValue = $store->data[$key] ?? null;
+        $store->data[$key] = $value;
         self::triggerListener($key, $oldValue, $value);
     }
 
     /**
      * 获取上下文值
      *
-     * @template T
      * @param string $key     键名
-     * @param T      $default 默认值
-     * @return T|mixed
+     * @param mixed  $default 默认值
      */
     public static function get(string $key, mixed $default = null): mixed
     {
-        self::initStorage();
-        return array_key_exists($key, self::$local) ? self::$local[$key] : $default;
+        $data = self::store()->data;
+
+        return array_key_exists($key, $data) ? $data[$key] : $default;
     }
 
     /**
-     * 获取上下文值并断言类型
+     * 获取上下文值，不存在时抛出异常
      *
-     * @template T
-     * @param string $key     键名
-     * @param class-string<T> $type 期望的类型
-     * @return T
-     * @throws ContextException 如果值不存在或类型不匹配
+     * @throws ContextException 键不存在时
      */
-    public static function getOfType(string $key, string $type): mixed
+    public static function getOrFail(string $key): mixed
     {
-        $value = self::get($key);
-        if ($value === null) {
-            throw new ContextException("上下文键 '{$key}' 不存在");
+        $data = self::store()->data;
+
+        if (!array_key_exists($key, $data)) {
+            throw ContextException::keyNotFound($key);
         }
-        if (!($value instanceof $type)) {
-            throw new ContextException(
-                "上下文键 '{$key}' 的值不是 {$type} 类型，实际类型为 " . get_debug_type($value)
-            );
-        }
-        return $value;
+
+        return $data[$key];
     }
 
     /**
      * 判断键是否存在
-     *
-     * @param string $key 键名
-     * @return bool
      */
     public static function has(string $key): bool
     {
-        self::initStorage();
-        return array_key_exists($key, self::$local);
+        return array_key_exists($key, self::store()->data);
     }
 
     /**
      * 删除指定键
-     *
-     * @param string $key 键名
      */
     public static function delete(string $key): void
     {
-        self::initStorage();
-        if (array_key_exists($key, self::$local)) {
-            $oldValue = self::$local[$key];
-            unset(self::$local[$key]);
-            self::triggerListener($key, $oldValue, null);
+        $store = self::store();
+
+        if (!array_key_exists($key, $store->data)) {
+            return;
         }
+
+        $oldValue = $store->data[$key];
+        unset($store->data[$key]);
+        self::triggerListener($key, $oldValue, null);
     }
 
     /**
@@ -199,9 +224,10 @@ final class Context implements JsonSerializable
      */
     public static function clear(): void
     {
-        self::initStorage();
-        $oldData = self::$local;
-        self::$local = [];
+        $store = self::store();
+        $oldData = $store->data;
+        $store->data = [];
+
         foreach ($oldData as $key => $value) {
             self::triggerListener($key, $value, null);
         }
@@ -214,126 +240,83 @@ final class Context implements JsonSerializable
      */
     public static function copy(): array
     {
-        self::initStorage();
-        return self::$local;
+        return self::store()->data;
     }
 
     /**
-     * 获取当前上下文中的所有键名
-     *
-     * @return array<int, string>
-     */
-    public static function keys(): array
-    {
-        self::initStorage();
-        return array_keys(self::$local);
-    }
-
-    /**
-     * 获取当前上下文中的键值对数量
-     *
-     * @return int
-     */
-    public static function count(): int
-    {
-        self::initStorage();
-        return count(self::$local);
-    }
-
-    /**
-     * 获取当前上下文中的所有数据
+     * 获取当前上下文中的所有数据（copy 的别名）
      *
      * @return array<string, mixed>
      */
     public static function all(): array
     {
-        self::initStorage();
-        return self::$local;
+        return self::store()->data;
+    }
+
+    /**
+     * 获取当前上下文中的所有键名
+     *
+     * @return list<string>
+     */
+    public static function keys(): array
+    {
+        return array_keys(self::store()->data);
+    }
+
+    /**
+     * 获取当前上下文中的键值对数量
+     */
+    public static function count(): int
+    {
+        return count(self::store()->data);
+    }
+
+    /**
+     * 当前上下文是否为空
+     */
+    public static function isEmpty(): bool
+    {
+        return self::store()->data === [];
     }
 
     /**
      * 将数组合并到当前上下文中
      *
      * @param array<string, mixed> $data      要合并的数据
-     * @param bool                 $overwrite 是否覆盖已存在的键，默认为true
+     * @param bool                 $overwrite 是否覆盖已存在的键
      */
     public static function merge(array $data, bool $overwrite = true): void
     {
-        self::initStorage();
+        $store = self::store();
+
         foreach ($data as $key => $value) {
-            if ($overwrite || !array_key_exists($key, self::$local)) {
-                $oldValue = self::$local[$key] ?? null;
-                self::$local[$key] = $value;
-                self::triggerListener($key, $oldValue, $value);
+            if (!$overwrite && array_key_exists($key, $store->data)) {
+                continue;
             }
+
+            $oldValue = $store->data[$key] ?? null;
+            $store->data[$key] = $value;
+            self::triggerListener($key, $oldValue, $value);
         }
     }
 
     /**
-     * 在新的上下文作用域中执行callable，结束后自动回滚到之前的状态
-     *
-     * @template T
-     * @param callable(): T $callable 要执行的回调函数
-     * @return T
-     * @throws Throwable
-     */
-    public static function run(callable $callable): mixed
-    {
-        self::initStorage();
-
-        $backup = self::$local;
-        self::$contextStack[] = $backup;
-        self::$local = [];
-        self::$initialized = true;
-
-        try {
-            return $callable();
-        } finally {
-            array_pop(self::$contextStack);
-            self::$local = $backup;
-        }
-    }
-
-    /**
-     * 在继承当前上下文的新作用域中执行callable
-     *
-     * @template T
-     * @param callable(): T $callable 要执行的回调函数
-     * @return T
-     * @throws Throwable
-     */
-    public static function fork(callable $callable): mixed
-    {
-        self::initStorage();
-
-        $backup = self::$local;
-        self::$contextStack[] = $backup;
-        self::$local = [...$backup];
-        self::$initialized = true;
-
-        try {
-            return $callable();
-        } finally {
-            array_pop(self::$contextStack);
-            self::$local = $backup;
-        }
-    }
-
-    /**
-     * 从快照恢复上下文
+     * 用快照整体替换当前上下文
      *
      * @param array<string, mixed> $snapshot 上下文快照
      */
     public static function restore(array $snapshot): void
     {
-        self::initStorage();
-        $oldData = self::$local;
-        self::$local = $snapshot;
+        $store = self::store();
+        $oldData = $store->data;
+        $store->data = $snapshot;
+
         foreach ($oldData as $key => $value) {
             if (!array_key_exists($key, $snapshot)) {
                 self::triggerListener($key, $value, null);
             }
         }
+
         foreach ($snapshot as $key => $value) {
             if (!array_key_exists($key, $oldData) || $oldData[$key] !== $value) {
                 self::triggerListener($key, $oldData[$key] ?? null, $value);
@@ -341,129 +324,531 @@ final class Context implements JsonSerializable
         }
     }
 
+    // ==================== 类型安全访问器 ====================
+
+    /**
+     * 获取上下文值并断言为指定类的实例
+     *
+     * @template T of object
+     * @param string          $key  键名
+     * @param class-string<T> $type 期望的类型
+     * @return T
+     * @throws ContextException 键不存在或类型不匹配
+     */
+    public static function getOfType(string $key, string $type): object
+    {
+        $value = self::store()->data[$key] ?? null;
+
+        if ($value === null) {
+            throw ContextException::keyNotFound($key);
+        }
+
+        if (!$value instanceof $type) {
+            throw ContextException::typeMismatch($key, $type, $value);
+        }
+
+        return $value;
+    }
+
+    /**
+     * 获取字符串值
+     *
+     * @throws ContextException 值存在但类型不符
+     */
+    public static function getString(string $key, ?string $default = null): ?string
+    {
+        $value = self::store()->data[$key] ?? null;
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (!is_string($value)) {
+            throw ContextException::typeMismatch($key, 'string', $value);
+        }
+
+        return $value;
+    }
+
+    /**
+     * 获取整数值（数字字符串会被安全转换）
+     *
+     * @throws ContextException 值存在但无法转换
+     */
+    public static function getInt(string $key, ?int $default = null): ?int
+    {
+        $value = self::store()->data[$key] ?? null;
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (is_int($value)) {
+            return $value;
+        }
+
+        if (is_string($value) && preg_match('/^-?\d+$/', $value) === 1) {
+            return (int)$value;
+        }
+
+        if (is_float($value) && (float)(int)$value === $value) {
+            return (int)$value;
+        }
+
+        throw ContextException::typeMismatch($key, 'int', $value);
+    }
+
+    /**
+     * 获取浮点值
+     *
+     * @throws ContextException 值存在但无法转换
+     */
+    public static function getFloat(string $key, ?float $default = null): ?float
+    {
+        $value = self::store()->data[$key] ?? null;
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (is_float($value) || is_int($value)) {
+            return (float)$value;
+        }
+
+        if (is_string($value) && is_numeric($value)) {
+            return (float)$value;
+        }
+
+        throw ContextException::typeMismatch($key, 'float', $value);
+    }
+
+    /**
+     * 获取布尔值（兼容 "1"/"true"/"yes"/"on" 等常见表示）
+     *
+     * @throws ContextException 值存在但无法转换
+     */
+    public static function getBool(string $key, ?bool $default = null): ?bool
+    {
+        $value = self::store()->data[$key] ?? null;
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (is_int($value) && ($value === 0 || $value === 1)) {
+            return $value === 1;
+        }
+
+        if (is_string($value)) {
+            $parsed = filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            if ($parsed !== null) {
+                return $parsed;
+            }
+        }
+
+        throw ContextException::typeMismatch($key, 'bool', $value);
+    }
+
+    /**
+     * 获取数组值
+     *
+     * @param array<mixed>|null $default
+     * @return array<mixed>|null
+     * @throws ContextException 值存在但类型不符
+     */
+    public static function getArray(string $key, ?array $default = null): ?array
+    {
+        $value = self::store()->data[$key] ?? null;
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (!is_array($value)) {
+            throw ContextException::typeMismatch($key, 'array', $value);
+        }
+
+        return $value;
+    }
+
+    // ==================== 便捷操作 ====================
+
+    /**
+     * 获取值，不存在时用工厂函数生成并写入
+     *
+     * @param string  $key     键名
+     * @param Closure $factory 值工厂
+     */
+    public static function getOrSet(string $key, Closure $factory): mixed
+    {
+        $store = self::store();
+
+        if (array_key_exists($key, $store->data)) {
+            return $store->data[$key];
+        }
+
+        $value = $factory();
+        self::set($key, $value);
+
+        return $value;
+    }
+
+    /**
+     * 仅在键不存在时写入
+     *
+     * @return bool 是否发生了写入
+     */
+    public static function add(string $key, mixed $value): bool
+    {
+        if (array_key_exists($key, self::store()->data)) {
+            return false;
+        }
+
+        self::set($key, $value);
+
+        return true;
+    }
+
+    /**
+     * 取出并删除某个键
+     */
+    public static function pull(string $key, mixed $default = null): mixed
+    {
+        $data = self::store()->data;
+
+        if (!array_key_exists($key, $data)) {
+            return $default;
+        }
+
+        $value = $data[$key];
+        self::delete($key);
+
+        return $value;
+    }
+
+    /**
+     * 数值自增
+     *
+     * @throws ContextException 现有值不是数字
+     */
+    public static function increment(string $key, int|float $step = 1): int|float
+    {
+        $current = self::store()->data[$key] ?? 0;
+
+        if (!is_int($current) && !is_float($current)) {
+            throw ContextException::typeMismatch($key, 'int|float', $current);
+        }
+
+        $value = $current + $step;
+        self::set($key, $value);
+
+        return $value;
+    }
+
+    /**
+     * 数值自减
+     *
+     * @throws ContextException 现有值不是数字
+     */
+    public static function decrement(string $key, int|float $step = 1): int|float
+    {
+        return self::increment($key, -$step);
+    }
+
+    /**
+     * 向数组型上下文值追加元素
+     *
+     * @throws ContextException 现有值不是数组
+     */
+    public static function push(string $key, mixed ...$values): void
+    {
+        $current = self::store()->data[$key] ?? [];
+
+        if (!is_array($current)) {
+            throw ContextException::typeMismatch($key, 'array', $current);
+        }
+
+        foreach ($values as $value) {
+            $current[] = $value;
+        }
+
+        self::set($key, $current);
+    }
+
+    /**
+     * 仅获取指定键组成的子集
+     *
+     * @param list<string> $keys
+     * @return array<string, mixed>
+     */
+    public static function only(array $keys): array
+    {
+        return array_intersect_key(self::store()->data, array_flip($keys));
+    }
+
+    /**
+     * 排除指定键后的子集
+     *
+     * @param list<string> $keys
+     * @return array<string, mixed>
+     */
+    public static function except(array $keys): array
+    {
+        return array_diff_key(self::store()->data, array_flip($keys));
+    }
+
+    // ==================== 作用域控制 ====================
+
+    /**
+     * 在全新的空白上下文作用域中执行回调，结束后自动回滚
+     *
+     * @template T
+     * @param callable(): T $callable 回调
+     * @return T
+     * @throws Throwable 回调抛出的异常会原样向外传递
+     */
+    public static function run(callable $callable): mixed
+    {
+        return self::runWith([], $callable);
+    }
+
+    /**
+     * 在继承当前上下文的新作用域中执行回调，结束后自动回滚
+     *
+     * @template T
+     * @param callable(): T $callable 回调
+     * @return T
+     * @throws Throwable
+     */
+    public static function fork(callable $callable): mixed
+    {
+        return self::runWith(self::store()->data, $callable);
+    }
+
+    /**
+     * 在指定初始数据的新作用域中执行回调
+     *
+     * @template T
+     * @param array<string, mixed> $initial  初始上下文
+     * @param callable(): T        $callable 回调
+     * @return T
+     * @throws Throwable
+     */
+    public static function runWith(array $initial, callable $callable): mixed
+    {
+        $store = self::store();
+        $depth = $store->push($initial);
+
+        try {
+            return $callable();
+        } finally {
+            $store->unwind($depth);
+        }
+    }
+
+    /**
+     * 在临时覆盖若干键的作用域中执行回调
+     *
+     * @template T
+     * @param array<string, mixed> $values   临时覆盖的键值
+     * @param callable(): T        $callable 回调
+     * @return T
+     * @throws Throwable
+     */
+    public static function with(array $values, callable $callable): mixed
+    {
+        return self::runWith([...self::store()->data, ...$values], $callable);
+    }
+
+    /**
+     * 手动进入一个作用域，返回可关闭的句柄
+     *
+     * 适合中间件等无法用闭包包裹的场景；句柄析构时会自动回滚。
+     *
+     * @param array<string, mixed>|null $initial null 表示继承当前上下文
+     */
+    public static function enter(?array $initial = null): ContextScope
+    {
+        $store = self::store();
+        $depth = $store->push($initial ?? $store->data);
+
+        return new ContextScope($store, $depth);
+    }
+
+    /**
+     * 把当前上下文快照绑定到回调上
+     *
+     * 用于向新协程/新纤程投递任务时继承父上下文：
+     *
+     * ```php
+     * go(Context::bind(function () {
+     *     // 这里可以读到父协程的 trace_id
+     * }));
+     * ```
+     *
+     * @param callable                  $callable 目标回调
+     * @param array<string, mixed>|null $snapshot 指定快照，默认取当前上下文
+     */
+    public static function bind(callable $callable, ?array $snapshot = null): Closure
+    {
+        $snapshot ??= self::store()->data;
+
+        return static function (mixed ...$args) use ($callable, $snapshot): mixed {
+            return self::runWith($snapshot, static fn (): mixed => $callable(...$args));
+        };
+    }
+
+    /**
+     * 当前作用域嵌套深度
+     */
+    public static function depth(): int
+    {
+        return self::store()->depth();
+    }
+
+    // ==================== 监听器 ====================
+
     /**
      * 注册上下文变更监听器
      *
-     * @param string  $key      监听的键名
-     * @param Closure $listener 监听器函数，接收参数：($key, $oldValue, $newValue)
+     * @param string  $key      键名，传入 Context::WILDCARD 可监听所有键
+     * @param Closure $listener 监听器，签名为 (string $key, mixed $oldValue, mixed $newValue)
+     * @return string 监听器 ID，可用于精确移除
      */
-    public static function listen(string $key, Closure $listener): void
+    public static function listen(string $key, Closure $listener): string
     {
-        if (!isset(self::$listeners[$key])) {
-            self::$listeners[$key] = [];
+        $id = 'l' . (++self::$listenerSeq);
+        self::$listeners[$key][$id] = $listener;
+
+        return $id;
+    }
+
+    /**
+     * 移除监听器
+     *
+     * @param string      $key 键名
+     * @param string|null $id  监听器 ID，为 null 时移除该键的全部监听器
+     */
+    public static function unlisten(string $key, ?string $id = null): void
+    {
+        if ($id === null) {
+            unset(self::$listeners[$key]);
+
+            return;
         }
-        self::$listeners[$key][] = $listener;
+
+        unset(self::$listeners[$key][$id]);
+
+        if (self::$listeners[$key] === []) {
+            unset(self::$listeners[$key]);
+        }
     }
 
     /**
-     * 移除上下文变更监听器
+     * 已注册监听器的键列表
      *
-     * @param string $key 监听的键名
+     * @return list<string>
      */
-    public static function unlisten(string $key): void
+    public static function listenedKeys(): array
     {
-        unset(self::$listeners[$key]);
+        return array_keys(self::$listeners);
+    }
+
+    // ==================== 运行时探测 ====================
+
+    /**
+     * 获取当前运行时（枚举）
+     *
+     * 注意：结果不做静态缓存，因为同一进程内可能先后处于协程内外。
+     */
+    public static function runtime(): Runtime
+    {
+        if (Fiber::getCurrent() !== null) {
+            return Runtime::Fiber;
+        }
+
+        if (self::swooleLoaded() && self::swooleCid() > 0) {
+            return Runtime::Swoole;
+        }
+
+        if (self::swowLoaded() && self::swowCurrent() !== null) {
+            return Runtime::Swow;
+        }
+
+        if (self::isThreadEnvironment()) {
+            return Runtime::Thread;
+        }
+
+        if (function_exists('pcntl_fork')) {
+            return Runtime::Process;
+        }
+
+        return Runtime::Sync;
     }
 
     /**
-     * 获取当前运行时类型
+     * 获取当前运行时类型字符串
      *
-     * @return string 返回 Runtime 常量之一
+     * @return string RUNTIME_* 常量之一
      */
     public static function getRuntime(): string
     {
-        if (self::$runtime !== null) {
-            return self::$runtime;
-        }
-
-        // 检查 Fiber
-        if (PHP_VERSION_ID >= 80300 && class_exists(Fiber::class) && Fiber::getCurrent() !== null) {
-            return self::$runtime = self::RUNTIME_FIBER;
-        }
-
-        // 检查 Swoole 协程
-        if (extension_loaded('swoole') && self::isSwooleCoroutine()) {
-            return self::$runtime = self::RUNTIME_SWOOLE;
-        }
-
-        // 检查 Swow 协程
-        if (extension_loaded('swow') && self::isSwowCoroutine()) {
-            return self::$runtime = self::RUNTIME_SWOW;
-        }
-
-        // 检查多线程环境 (ZTS + pthreads/parallel)
-        if (self::isThreadEnvironment()) {
-            return self::$runtime = self::RUNTIME_THREAD;
-        }
-
-        // 检查多进程环境
-        if (self::isProcessEnvironment()) {
-            return self::$runtime = self::RUNTIME_PROCESS;
-        }
-
-        return self::$runtime = self::RUNTIME_SYNC;
+        return self::runtime()->value;
     }
 
     /**
-     * 检查是否在协程/Fiber环境中运行
-     *
-     * @return bool
+     * 是否在协程/纤程环境中运行
      */
     public static function isCoroutine(): bool
     {
-        $runtime = self::getRuntime();
-        return $runtime === self::RUNTIME_FIBER 
-            || $runtime === self::RUNTIME_SWOOLE 
-            || $runtime === self::RUNTIME_SWOW;
+        return self::runtime()->isCoroutine();
     }
 
     /**
-     * 检查是否在多线程环境中运行
-     *
-     * @return bool
+     * 是否在多线程环境中运行
      */
     public static function isThread(): bool
     {
-        return self::getRuntime() === self::RUNTIME_THREAD;
+        return self::runtime() === Runtime::Thread;
     }
 
     /**
-     * 检查是否在多进程环境中运行
-     *
-     * @return bool
+     * 是否在多进程环境中运行
      */
     public static function isProcess(): bool
     {
-        return self::getRuntime() === self::RUNTIME_PROCESS;
+        return self::runtime() === Runtime::Process;
     }
 
     /**
-     * 获取当前协程/Fiber/线程/进程 ID
-     *
-     * @return int|string|null
+     * 当前执行单元是否为主执行单元（非协程/纤程）
+     */
+    public static function isMain(): bool
+    {
+        return self::currentScope() === null;
+    }
+
+    /**
+     * 获取当前执行单元 ID（协程/纤程/线程/进程）
      */
     public static function getExecutionId(): int|string|null
     {
-        if (self::$executionId !== null) {
-            return self::$executionId;
-        }
-
-        $id = match (self::getRuntime()) {
-            self::RUNTIME_FIBER => self::getFiberId(),
-            self::RUNTIME_SWOOLE => self::getSwooleCoroutineId(),
-            self::RUNTIME_SWOW => self::getSwowCoroutineId(),
-            self::RUNTIME_THREAD => self::getThreadId(),
-            self::RUNTIME_PROCESS => getmypid() ?: null,
-            default => null,
+        return match (self::runtime()) {
+            Runtime::Fiber => self::fiberId(),
+            Runtime::Swoole => self::swooleCid(),
+            Runtime::Swow => self::swowCoroutineId(),
+            Runtime::Thread => self::getThreadId(),
+            Runtime::Process => self::getProcessId(),
+            Runtime::Sync => null,
         };
-
-        return self::$executionId = $id;
     }
 
     /**
-     * 获取当前协程/Fiber ID（兼容旧 API）
-     *
-     * @return int|string|null
+     * 获取当前执行单元 ID（getExecutionId 的兼容别名）
      */
     public static function getCoroutineId(): int|string|null
     {
@@ -472,117 +857,98 @@ final class Context implements JsonSerializable
 
     /**
      * 获取当前进程 ID
-     *
-     * @return int
      */
     public static function getProcessId(): int
     {
-        return getmypid();
+        $pid = getmypid();
+
+        return $pid === false ? -1 : $pid;
     }
 
     /**
-     * 获取当前线程 ID（如果支持）
+     * 获取当前线程的稳定标识
      *
-     * @return int|null
+     * PHP 未提供公开的线程 ID API，这里返回一个进程内稳定、线程间唯一的不透明整数；
+     * 非多线程环境返回 null。
      */
     public static function getThreadId(): ?int
     {
-        // pthreads 扩展
-        if (class_exists(\Thread::class) && method_exists(\Thread::class, 'getCurrentThreadId')) {
-            return \Thread::getCurrentThreadId();
+        if (!self::isThreadEnvironment()) {
+            return null;
         }
 
-        // parallel 扩展
-        if (function_exists('parallel\\Runtime')) {
-            // parallel 没有直接的线程 ID 获取方法
-            return spl_object_id(new \stdClass());
-        }
-
-        return null;
+        return self::$threadId ??= random_int(1, PHP_INT_MAX);
     }
 
     /**
-     * 重置上下文状态（主要用于测试）
+     * 重置全部上下文状态（主要用于测试）
      *
      * @internal
      */
     public static function reset(): void
     {
-        self::$local = [];
-        self::$initialized = false;
-        self::$runtime = null;
-        self::$executionId = null;
-        self::$contextStack = [];
+        self::$rootStore = null;
+        self::$scopedStores = null;
         self::$listeners = [];
+        self::$listenerSeq = 0;
         self::$processContexts = [];
-        self::$threadContexts = [];
+        self::$threadId = null;
         self::$postFork = false;
     }
 
     // ==================== 多进程支持 ====================
 
     /**
-     * 在 fork 后初始化子进程上下文
+     * 是否处于 fork 之后的子进程
+     */
+    public static function isPostFork(): bool
+    {
+        return self::$postFork;
+    }
+
+    /**
+     * 在调用 pcntl_fork() 之前保存上下文快照
+     */
+    public static function prepareFork(): void
+    {
+        self::set(self::PARENT_PROCESS_ID, self::getProcessId());
+        self::$processContexts[self::getProcessId()] = self::store()->data;
+    }
+
+    /**
+     * 在 pcntl_fork() 之后的子进程中初始化上下文
      *
-     * 应该在 pcntl_fork() 后的子进程中调用
-     *
-     * @param bool $inheritParentContext 是否继承父进程的上下文，默认为 true
+     * @param bool $inheritParentContext 是否继承父进程上下文
      */
     public static function afterFork(bool $inheritParentContext = true): void
     {
-        $parentPid = self::get(self::PARENT_PROCESS_ID);
+        $store = self::store();
+        $parentPid = $store->data[self::PARENT_PROCESS_ID] ?? null;
 
-        if ($inheritParentContext && $parentPid !== null) {
-            // 从父进程继承上下文
-            $snapshot = self::$processContexts[$parentPid] ?? [];
-            if (!empty($snapshot)) {
-                self::$local = [...$snapshot];
-            }
-        } else {
-            // 清空上下文，开始新的上下文
-            self::$local = [];
+        if ($inheritParentContext && is_int($parentPid) && isset(self::$processContexts[$parentPid])) {
+            $store->data = self::$processContexts[$parentPid];
+        } elseif (!$inheritParentContext) {
+            $store->data = [];
         }
 
-        // 设置当前进程 ID
-        self::set(self::PROCESS_ID, getmypid());
-
-        // 重置运行时检测
-        self::$runtime = null;
-        self::$executionId = null;
-        self::$initialized = true;
+        $store->data[self::PROCESS_ID] = self::getProcessId();
         self::$postFork = true;
     }
 
     /**
-     * 准备 fork 前的上下文快照
+     * fork 出子进程执行任务
      *
-     * 在调用 pcntl_fork() 之前调用此方法
+     * @param callable $task           任务回调，在子进程中执行
+     * @param bool     $inheritContext 是否继承父进程上下文
+     * @return int 父进程中返回子进程 PID（子进程执行完毕后直接退出，不会返回）
+     * @throws ContextException pcntl 不可用或 fork 失败
      */
-    public static function prepareFork(): void
+    public static function runInProcess(callable $task, bool $inheritContext = true): int
     {
-        self::initStorage();
-        self::set(self::PARENT_PROCESS_ID, getmypid());
-
-        // 保存当前上下文快照
-        self::$processContexts[getmypid()] = self::$local;
-    }
-
-    /**
-     * 在子进程中运行任务
-     *
-     * @template T
-     * @param callable(): T $task              任务回调
-     * @param bool          $inheritContext    是否继承父进程上下文
-     * @return T|null 返回任务结果，如果 fork 失败返回 null
-     */
-    public static function runInProcess(callable $task, bool $inheritContext = true): mixed
-    {
-        if (!function_exists('pcntl_fork')) {
-            throw new ContextException('pcntl 扩展未安装，无法使用多进程功能');
-        }
-
+        self::assertPcntl();
         self::prepareFork();
 
+        /** @var int $pid */
         $pid = pcntl_fork();
 
         if ($pid === -1) {
@@ -590,107 +956,122 @@ final class Context implements JsonSerializable
         }
 
         if ($pid === 0) {
-            // 子进程
             self::afterFork($inheritContext);
+
             try {
-                $result = $task();
+                $task();
                 exit(0);
-            } catch (Throwable $e) {
+            } catch (Throwable) {
                 exit(1);
             }
         }
 
-        // 父进程
-        return null;
+        return $pid;
     }
 
     /**
-     * 使用进程池执行多个任务
+     * 等待指定子进程结束
      *
-     * @param array<callable> $tasks          任务数组
-     * @param int             $maxProcesses   最大进程数
-     * @param bool            $inheritContext 是否继承父进程上下文
-     * @return array 任务结果数组
+     * @param int $pid 子进程 PID
+     * @return int 退出码，异常终止返回 -1
+     * @throws ContextException pcntl 不可用
      */
-    public static function parallelProcesses(array $tasks, int $maxProcesses = 4, bool $inheritContext = true): array
+    public static function waitProcess(int $pid): int
     {
-        if (!function_exists('pcntl_fork')) {
-            throw new ContextException('pcntl 扩展未安装，无法使用多进程功能');
+        self::assertPcntl();
+
+        $status = 0;
+        pcntl_waitpid($pid, $status);
+
+        return pcntl_wifexited($status) ? pcntl_wexitstatus($status) : -1;
+    }
+
+    /**
+     * 使用进程池并行执行多个任务并收集返回值
+     *
+     * 相比 v2 的实现，这里改用 stream_socket_pair（无需 sockets 扩展）、
+     * 先读干管道再回收子进程，彻底规避大结果集导致的管道死锁。
+     *
+     * @param array<array-key, callable> $tasks          任务数组
+     * @param int                        $maxProcesses   最大并发进程数
+     * @param bool                       $inheritContext 是否继承父进程上下文
+     * @param bool                       $throwOnError   子进程异常时是否抛出
+     * @return array<array-key, mixed> 与 $tasks 键一一对应的结果
+     * @throws ContextException
+     */
+    public static function parallelProcesses(
+        array $tasks,
+        int $maxProcesses = 4,
+        bool $inheritContext = true,
+        bool $throwOnError = true,
+    ): array {
+        self::assertPcntl();
+
+        if ($maxProcesses < 1) {
+            throw new ContextException('最大进程数必须大于 0');
         }
 
         self::prepareFork();
+
+        /** @var array<array-key, mixed> $results */
         $results = [];
-        $pids = [];
-        $pipes = [];
+        /** @var array<array-key, string> $errors */
+        $errors = [];
+        /** @var array<int, array{key: array-key, stream: resource}> $running */
+        $running = [];
 
         foreach ($tasks as $key => $task) {
-            // 创建管道用于进程间通信
-            $pipe = [];
-            if (!socket_create_pair(AF_UNIX, SOCK_STREAM, 0, $pipe)) {
-                throw new ContextException('创建 socket 对失败');
+            while (count($running) >= $maxProcesses) {
+                self::collectProcess($running, $results, $errors);
             }
 
+            $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+
+            if ($pair === false) {
+                throw new ContextException('创建进程间通信管道失败');
+            }
+
+            /** @var int $pid */
             $pid = pcntl_fork();
 
             if ($pid === -1) {
+                fclose($pair[0]);
+                fclose($pair[1]);
+
                 throw new ContextException("fork 任务 {$key} 失败");
             }
 
             if ($pid === 0) {
-                // 子进程
-                socket_close($pipe[0]);
+                fclose($pair[0]);
                 self::afterFork($inheritContext);
 
                 try {
-                    $result = $task();
-                    $serialized = serialize($result);
-                    socket_write($pipe[1], $serialized);
-                    socket_close($pipe[1]);
-                    exit(0);
+                    $payload = ['ok' => true, 'value' => $task()];
                 } catch (Throwable $e) {
-                    $error = serialize(['__error__' => $e->getMessage()]);
-                    socket_write($pipe[1], $error);
-                    socket_close($pipe[1]);
-                    exit(1);
+                    $payload = ['ok' => false, 'error' => $e->getMessage()];
                 }
+
+                fwrite($pair[1], serialize($payload));
+                fclose($pair[1]);
+
+                exit($payload['ok'] === true ? 0 : 1);
             }
 
-            // 父进程
-            socket_close($pipe[1]);
-            $pids[$key] = $pid;
-            $pipes[$key] = $pipe[0];
-
-            // 控制并发进程数
-            while (count($pids) >= $maxProcesses) {
-                $status = 0;
-                $finishedPid = pcntl_wait($status);
-                if ($finishedPid > 0) {
-                    foreach ($pids as $key => $pid) {
-                        if ($pid === $finishedPid) {
-                            // 读取结果
-                            $data = '';
-                            while ($chunk = socket_read($pipes[$key], 4096)) {
-                                $data .= $chunk;
-                            }
-                            socket_close($pipes[$key]);
-                            $results[$key] = unserialize($data);
-                            unset($pids[$key], $pipes[$key]);
-                            break;
-                        }
-                    }
-                }
-            }
+            fclose($pair[1]);
+            $running[$pid] = ['key' => $key, 'stream' => $pair[0]];
         }
 
-        // 等待所有子进程完成
-        foreach ($pids as $key => $pid) {
-            pcntl_waitpid($pid, $status);
-            $data = '';
-            while ($chunk = socket_read($pipes[$key], 4096)) {
-                $data .= $chunk;
+        while ($running !== []) {
+            self::collectProcess($running, $results, $errors);
+        }
+
+        if ($throwOnError && $errors !== []) {
+            $detail = [];
+            foreach ($errors as $key => $message) {
+                $detail[] = "[{$key}] {$message}";
             }
-            socket_close($pipes[$key]);
-            $results[$key] = unserialize($data);
+
+            throw new ContextException('子进程任务执行失败: ' . implode('; ', $detail));
         }
 
         return $results;
@@ -699,279 +1080,138 @@ final class Context implements JsonSerializable
     // ==================== 多线程支持 ====================
 
     /**
-     * 检查是否在多线程环境中
+     * 在新线程中运行任务（需要 parallel 扩展）
      *
-     * @return bool
+     * 注意：pthreads 最高只支持 PHP 7.4，v3.0 起不再支持。
+     *
+     * @param callable $task           任务回调
+     * @param bool     $inheritContext 是否继承当前线程上下文
+     * @return object parallel\Future
+     * @throws ContextException 未安装 parallel 扩展
      */
-    private static function isThreadEnvironment(): bool
+    public static function runInThread(callable $task, bool $inheritContext = true): object
     {
-        // 检查 ZTS (Zend Thread Safety)
-        if (!defined('ZEND_THREAD_SAFE') || !ZEND_THREAD_SAFE) {
-            return false;
+        if (!self::parallelLoaded()) {
+            throw ContextException::missingExtension('parallel', '多线程功能');
         }
 
-        // 检查 pthreads 扩展
-        if (class_exists(\Thread::class)) {
-            return true;
-        }
+        $snapshot = $inheritContext ? self::store()->data : [];
+        $runtime = new \parallel\Runtime();
 
-        // 检查 parallel 扩展
-        if (extension_loaded('parallel')) {
-            return true;
-        }
+        /** @var object $future */
+        $future = $runtime->run(static function () use ($task, $snapshot): mixed {
+            Context::restore($snapshot);
 
-        return false;
+            return $task();
+        });
+
+        return $future;
     }
 
     /**
-     * 检查是否在多进程环境中
+     * 使用线程池并行执行多个任务
      *
-     * @return bool
+     * @param array<array-key, callable> $tasks          任务数组
+     * @param int                        $maxThreads     最大并发线程数
+     * @param bool                       $inheritContext 是否继承当前线程上下文
+     * @return array<array-key, mixed>
+     * @throws ContextException 未安装 parallel 扩展
      */
-    private static function isProcessEnvironment(): bool
+    public static function parallelThreads(array $tasks, int $maxThreads = 4, bool $inheritContext = true): array
     {
-        // 如果有 pcntl 扩展且不是协程/线程环境，则认为是进程环境
-        // 注意：这里不能调用 isCoroutine() 或 isThreadEnvironment()，因为它们会调用 getRuntime()
-        // 而 getRuntime() 又会调用此方法，导致无限递归
-        if (!function_exists('pcntl_fork')) {
-            return false;
+        if (!self::parallelLoaded()) {
+            throw ContextException::missingExtension('parallel', '多线程功能');
         }
 
-        // 检查是否在协程中
-        if (PHP_VERSION_ID >= 80300 && class_exists(Fiber::class) && Fiber::getCurrent() !== null) {
-            return false;
+        if ($maxThreads < 1) {
+            throw new ContextException('最大线程数必须大于 0');
         }
 
-        if (extension_loaded('swoole') && \Swoole\Coroutine::getCid() !== -1) {
-            return false;
-        }
+        $snapshot = $inheritContext ? self::store()->data : [];
+        $runtimes = [];
+        $futures = [];
 
-        if (extension_loaded('swow') && class_exists(\Swow\Coroutine::class) && \Swow\Coroutine::getCurrent() !== null) {
-            return false;
-        }
+        foreach ($tasks as $key => $task) {
+            $index = count($runtimes) % $maxThreads;
+            $runtimes[$index] ??= new \parallel\Runtime();
 
-        // 检查是否在线程中
-        if (self::isThreadEnvironment()) {
-            return false;
-        }
+            $futures[$key] = $runtimes[$index]->run(static function () use ($task, $snapshot): mixed {
+                Context::restore($snapshot);
 
-        return true;
-    }
-
-    /**
-     * 在新线程中运行任务（需要 pthreads 或 parallel 扩展）
-     *
-     * @template T
-     * @param callable(): T $task           任务回调
-     * @param bool          $inheritContext 是否继承当前线程上下文
-     * @return mixed 返回线程对象或 Future
-     */
-    public static function runInThread(callable $task, bool $inheritContext = true): mixed
-    {
-        $contextSnapshot = $inheritContext ? self::copy() : [];
-
-        // pthreads 扩展
-        if (class_exists(\Thread::class)) {
-            $thread = new class($task, $contextSnapshot) extends \Thread {
-                private $task;
-                private array $context;
-                public mixed $result;
-
-                public function __construct(callable $task, array $context)
-                {
-                    $this->task = $task;
-                    $this->context = $context;
-                }
-
-                public function run(): void
-                {
-                    Context::restore($this->context);
-                    $this->result = ($this->task)();
-                }
-            };
-            $thread->start();
-            return $thread;
-        }
-
-        // parallel 扩展
-        if (extension_loaded('parallel')) {
-            $runtime = new \parallel\Runtime();
-            return $runtime->run(function () use ($task, $contextSnapshot) {
-                Context::restore($contextSnapshot);
                 return $task();
             });
         }
 
-        throw new ContextException('没有可用的多线程扩展（pthreads 或 parallel）');
-    }
+        $results = [];
 
-    /**
-     * 使用线程池执行多个任务
-     *
-     * @param array<callable> $tasks          任务数组
-     * @param int             $maxThreads     最大线程数
-     * @param bool            $inheritContext 是否继承当前线程上下文
-     * @return array 任务结果数组
-     */
-    public static function parallelThreads(array $tasks, int $maxThreads = 4, bool $inheritContext = true): array
-    {
-        // parallel 扩展
-        if (extension_loaded('parallel')) {
-            $contextSnapshot = $inheritContext ? self::copy() : [];
-            $runtime = new \parallel\Runtime();
-            $futures = [];
-
-            foreach ($tasks as $key => $task) {
-                $futures[$key] = $runtime->run(function () use ($task, $contextSnapshot) {
-                    Context::restore($contextSnapshot);
-                    return $task();
-                });
-            }
-
-            $results = [];
-            foreach ($futures as $key => $future) {
-                $results[$key] = $future->value();
-            }
-
-            return $results;
+        foreach ($futures as $key => $future) {
+            /** @var object{value: callable(): mixed} $future */
+            $results[$key] = ($future->value)();
         }
 
-        // pthreads 扩展
-        if (class_exists(\Thread::class)) {
-            $contextSnapshot = $inheritContext ? self::copy() : [];
-            $threads = [];
-
-            foreach ($tasks as $key => $task) {
-                $thread = new class($task, $contextSnapshot) extends \Thread {
-                    private $task;
-                    private array $context;
-                    public mixed $result;
-
-                    public function __construct(callable $task, array $context)
-                    {
-                        $this->task = $task;
-                        $this->context = $context;
-                    }
-
-                    public function run(): void
-                    {
-                        Context::restore($this->context);
-                        $this->result = ($this->task)();
-                    }
-                };
-                $thread->start();
-                $threads[$key] = $thread;
-
-                // 控制并发线程数
-                while (count($threads) >= $maxThreads) {
-                    foreach ($threads as $k => $t) {
-                        if (!$t->isRunning()) {
-                            $t->join();
-                            unset($threads[$k]);
-                            break;
-                        }
-                    }
-                    usleep(1000);
-                }
-            }
-
-            // 等待所有线程完成
-            $results = [];
-            foreach ($threads as $key => $thread) {
-                $thread->join();
-                $results[$key] = $thread->result;
-            }
-
-            return $results;
-        }
-
-        throw new ContextException('没有可用的多线程扩展（pthreads 或 parallel）');
+        return $results;
     }
 
-    // ==================== 分布式支持 ====================
+    // ==================== 序列化与分布式传递 ====================
 
     /**
      * 序列化上下文为 JSON 字符串
      *
-     * 用于分布式系统中跨节点传递上下文
-     *
-     * @param array<string> $onlyKeys 仅序列化指定的键，为空则序列化全部
-     * @return string JSON 字符串
-     * @throws ContextException 如果序列化失败
+     * @param list<string> $onlyKeys 仅序列化指定键，为空则全部
+     * @throws ContextException 序列化失败
      */
     public static function toJson(array $onlyKeys = []): string
     {
-        self::initStorage();
-        $data = $onlyKeys === [] ? self::$local : array_intersect_key(
-            self::$local,
-            array_flip($onlyKeys)
-        );
-
-        $serializable = [];
-        foreach ($data as $key => $value) {
-            $serializable[$key] = self::serializeValue($value);
-        }
-
         try {
-            $json = json_encode($serializable, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+            return json_encode(self::export($onlyKeys), JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            throw new ContextException('上下文序列化失败: ' . $e->getMessage(), 0, $e);
+            throw ContextException::serializeFailed($e->getMessage(), $e);
         }
-
-        return $json;
     }
 
     /**
      * 从 JSON 字符串反序列化上下文
      *
-     * @param string $json      JSON 字符串
-     * @param bool   $merge     是否合并到现有上下文，false 则替换
+     * @param string $json  JSON 字符串
+     * @param bool   $merge true 合并到现有上下文，false 整体替换
      * @return array<string, mixed> 反序列化后的数据
-     * @throws ContextException 如果反序列化失败
+     * @throws ContextException 反序列化失败
      */
     public static function fromJson(string $json, bool $merge = false): array
     {
-        try {
-            $data = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            throw new ContextException('上下文反序列化失败: ' . $e->getMessage(), 0, $e);
+        if (!json_validate($json)) {
+            throw ContextException::unserializeFailed(json_last_error_msg());
         }
+
+        /** @var mixed $data */
+        $data = json_decode($json, true);
 
         if (!is_array($data)) {
-            throw new ContextException('无效的上下文数据格式');
+            throw ContextException::unserializeFailed('无效的上下文数据格式');
         }
 
-        $result = [];
-        foreach ($data as $key => $value) {
-            $result[$key] = self::unserializeValue($value);
-        }
-
-        if ($merge) {
-            self::merge($result);
-        } else {
-            self::restore($result);
-        }
-
-        return $result;
+        /** @var array<string, mixed> $data */
+        return self::import($data, $merge);
     }
 
     /**
      * 导出可序列化的上下文数据
      *
-     * @param array<string> $onlyKeys 仅导出指定的键
+     * @param list<string> $onlyKeys 仅导出指定键
      * @return array<string, mixed>
      */
     public static function export(array $onlyKeys = []): array
     {
-        self::initStorage();
-        $data = $onlyKeys === [] ? self::$local : array_intersect_key(
-            self::$local,
-            array_flip($onlyKeys)
-        );
+        $data = self::store()->data;
+
+        if ($onlyKeys !== []) {
+            $data = array_intersect_key($data, array_flip($onlyKeys));
+        }
 
         $result = [];
+
         foreach ($data as $key => $value) {
-            $result[$key] = self::serializeValue($value);
+            $result[$key] = ValueSerializer::encode($value);
         }
 
         return $result;
@@ -987,8 +1227,9 @@ final class Context implements JsonSerializable
     public static function import(array $data, bool $merge = false): array
     {
         $result = [];
+
         foreach ($data as $key => $value) {
-            $result[$key] = self::unserializeValue($value);
+            $result[$key] = ValueSerializer::decode($value);
         }
 
         if ($merge) {
@@ -1000,20 +1241,22 @@ final class Context implements JsonSerializable
         return $result;
     }
 
+    // ==================== 分布式链路追踪 ====================
+
     /**
-     * 创建分布式追踪上下文
+     * 开启一条新链路
      *
-     * @param string|null $traceId 追踪ID，为空则自动生成
-     * @param string|null $nodeId   当前节点ID
-     * @return string 生成的 Trace ID
+     * @param string|null $traceId 链路 ID，为空则按 W3C 规范自动生成
+     * @param string|null $nodeId  当前节点 ID
+     * @return string 链路 ID
      */
     public static function startTrace(?string $traceId = null, ?string $nodeId = null): string
     {
-        $traceId = $traceId ?? self::generateTraceId();
-        $spanId = self::generateSpanId();
+        $traceId ??= TraceContext::generateTraceId();
 
         self::set(self::TRACE_ID, $traceId);
-        self::set(self::SPAN_ID, $spanId);
+        self::set(self::SPAN_ID, TraceContext::generateSpanId());
+        self::set(self::TRACE_FLAGS, TraceContext::FLAG_SAMPLED);
 
         if ($nodeId !== null) {
             self::set(self::NODE_ID, $nodeId);
@@ -1030,9 +1273,9 @@ final class Context implements JsonSerializable
     public static function startSpan(): string
     {
         $parentSpanId = self::get(self::SPAN_ID);
-        $newSpanId = self::generateSpanId();
+        $newSpanId = TraceContext::generateSpanId();
 
-        if ($parentSpanId !== null) {
+        if (is_string($parentSpanId)) {
             self::set(self::PARENT_SPAN_ID, $parentSpanId);
         }
 
@@ -1048,23 +1291,52 @@ final class Context implements JsonSerializable
      */
     public static function getTraceInfo(): array
     {
-        $traceId = self::get(self::TRACE_ID);
-        $spanId = self::get(self::SPAN_ID);
-        $parentSpanId = self::get(self::PARENT_SPAN_ID);
-        $nodeId = self::get(self::NODE_ID);
+        $data = self::store()->data;
+
+        $pick = static function (string $key) use ($data): ?string {
+            $value = $data[$key] ?? null;
+
+            return is_string($value) ? $value : null;
+        };
 
         return [
-            self::TRACE_ID => is_string($traceId) ? $traceId : null,
-            self::SPAN_ID => is_string($spanId) ? $spanId : null,
-            self::PARENT_SPAN_ID => is_string($parentSpanId) ? $parentSpanId : null,
-            self::NODE_ID => is_string($nodeId) ? $nodeId : null,
+            self::TRACE_ID => $pick(self::TRACE_ID),
+            self::SPAN_ID => $pick(self::SPAN_ID),
+            self::PARENT_SPAN_ID => $pick(self::PARENT_SPAN_ID),
+            self::NODE_ID => $pick(self::NODE_ID),
         ];
     }
 
     /**
-     * 设置来源节点信息（用于分布式调用）
-     *
-     * @param string $sourceNodeId 来源节点ID
+     * 当前链路是否被采样
+     */
+    public static function isSampled(): bool
+    {
+        $flags = self::get(self::TRACE_FLAGS);
+
+        if (is_int($flags)) {
+            return ($flags & TraceContext::FLAG_SAMPLED) === TraceContext::FLAG_SAMPLED;
+        }
+
+        return false;
+    }
+
+    /**
+     * 设置采样标志
+     */
+    public static function setSampled(bool $sampled = true): void
+    {
+        $flags = self::get(self::TRACE_FLAGS);
+        $flags = is_int($flags) ? $flags : 0;
+
+        self::set(
+            self::TRACE_FLAGS,
+            $sampled ? ($flags | TraceContext::FLAG_SAMPLED) : ($flags & ~TraceContext::FLAG_SAMPLED)
+        );
+    }
+
+    /**
+     * 设置来源节点 ID
      */
     public static function setSourceNode(string $sourceNodeId): void
     {
@@ -1072,9 +1344,7 @@ final class Context implements JsonSerializable
     }
 
     /**
-     * 设置关联ID（用于请求关联）
-     *
-     * @param string $correlationId 关联ID
+     * 设置关联 ID
      */
     public static function setCorrelationId(string $correlationId): void
     {
@@ -1082,9 +1352,7 @@ final class Context implements JsonSerializable
     }
 
     /**
-     * 设置请求ID
-     *
-     * @param string $requestId 请求ID
+     * 设置请求 ID
      */
     public static function setRequestId(string $requestId): void
     {
@@ -1092,9 +1360,9 @@ final class Context implements JsonSerializable
     }
 
     /**
-     * 获取分布式传递所需的上下文键
+     * 获取需要跨节点传递的上下文键
      *
-     * @return array<string>
+     * @return list<string>
      */
     public static function getDistributedKeys(): array
     {
@@ -1102,6 +1370,9 @@ final class Context implements JsonSerializable
             self::TRACE_ID,
             self::SPAN_ID,
             self::PARENT_SPAN_ID,
+            self::TRACE_FLAGS,
+            self::TRACE_STATE,
+            self::BAGGAGE,
             self::NODE_ID,
             self::SOURCE_NODE_ID,
             self::REQUEST_ID,
@@ -1110,7 +1381,7 @@ final class Context implements JsonSerializable
     }
 
     /**
-     * 导出分布式追踪上下文（用于跨节点传递）
+     * 导出用于跨节点传递的上下文
      *
      * @return array<string, mixed>
      */
@@ -1119,323 +1390,438 @@ final class Context implements JsonSerializable
         return self::export(self::getDistributedKeys());
     }
 
+    // ==================== W3C Trace Context ====================
+
     /**
-     * 导出为 HTTP Headers 格式
+     * 生成 W3C traceparent 头
      *
-     * @param string $prefix Header 前缀，默认 'X-Context-'
+     * @return string|null 当前 trace_id / span_id 不符合 W3C 规范时返回 null
+     */
+    public static function toTraceparent(): ?string
+    {
+        $traceId = self::get(self::TRACE_ID);
+        $spanId = self::get(self::SPAN_ID);
+
+        if (!is_string($traceId) || !is_string($spanId)) {
+            return null;
+        }
+
+        return TraceContext::build($traceId, $spanId, self::isSampled());
+    }
+
+    /**
+     * 解析 W3C traceparent 并写入上下文
+     *
+     * 上游 span 会成为本地的 parent_span_id，并自动生成新的本地 span_id。
+     *
+     * @param string      $traceparent traceparent 头值
+     * @param string|null $tracestate  tracestate 头值
+     * @return bool 是否解析成功
+     */
+    public static function fromTraceparent(string $traceparent, ?string $tracestate = null): bool
+    {
+        $parsed = TraceContext::parse($traceparent);
+
+        if ($parsed === null) {
+            return false;
+        }
+
+        self::set(self::TRACE_ID, $parsed['trace_id']);
+        self::set(self::PARENT_SPAN_ID, $parsed['span_id']);
+        self::set(self::SPAN_ID, TraceContext::generateSpanId());
+        self::set(self::TRACE_FLAGS, $parsed['flags']);
+
+        if ($tracestate !== null && $tracestate !== '') {
+            self::set(self::TRACE_STATE, $tracestate);
+        }
+
+        return true;
+    }
+
+    /**
+     * 设置一条 baggage
+     */
+    public static function setBaggage(string $key, string $value): void
+    {
+        $entries = self::baggageEntries();
+        $entries[$key] = $value;
+
+        self::set(self::BAGGAGE, TraceContext::buildBaggage($entries));
+    }
+
+    /**
+     * 读取 baggage
+     *
+     * @param string|null $key 为 null 时返回全部
+     * @return array<string, string>|string|null
+     */
+    public static function getBaggage(?string $key = null): array|string|null
+    {
+        $entries = self::baggageEntries();
+
+        return $key === null ? $entries : ($entries[$key] ?? null);
+    }
+
+    /**
+     * 导出 W3C 标准链路头
+     *
      * @return array<string, string>
      */
-    public static function toHeaders(string $prefix = 'X-Context-'): array
+    public static function toW3CHeaders(): array
     {
         $headers = [];
-        $data = self::exportForDistributed();
 
-        foreach ($data as $key => $value) {
-            if (is_scalar($value) || $value === null) {
-                $headers[$prefix . str_replace('_', '-', ucwords($key, '_'))] = (string)$value;
-            }
+        $traceparent = self::toTraceparent();
+        if ($traceparent !== null) {
+            $headers['traceparent'] = $traceparent;
+        }
+
+        $tracestate = self::get(self::TRACE_STATE);
+        if (is_string($tracestate) && $tracestate !== '') {
+            $headers['tracestate'] = $tracestate;
+        }
+
+        $baggage = self::get(self::BAGGAGE);
+        if (is_string($baggage) && $baggage !== '') {
+            $headers['baggage'] = $baggage;
         }
 
         return $headers;
     }
 
     /**
-     * 从 HTTP Headers 导入上下文
+     * 从 W3C 标准链路头恢复上下文（头名大小写不敏感）
      *
-     * @param array<string, string> $headers HTTP Headers
-     * @param string                $prefix  Header 前缀
+     * @param array<string, string> $headers
+     * @return bool 是否成功解析到 traceparent
+     */
+    public static function fromW3CHeaders(array $headers): bool
+    {
+        $normalized = self::normalizeHeaders($headers);
+
+        $baggage = $normalized['baggage'] ?? null;
+        if (is_string($baggage) && $baggage !== '') {
+            self::set(self::BAGGAGE, $baggage);
+        }
+
+        $traceparent = $normalized['traceparent'] ?? null;
+        if (!is_string($traceparent) || $traceparent === '') {
+            return false;
+        }
+
+        return self::fromTraceparent($traceparent, $normalized['tracestate'] ?? null);
+    }
+
+    /**
+     * 导出为 HTTP Headers（私有 X-Context-* 协议）
+     *
+     * @param string $prefix     Header 前缀
+     * @param bool   $withW3C    是否同时输出 traceparent/tracestate/baggage 标准头
+     * @return array<string, string>
+     */
+    public static function toHeaders(string $prefix = 'X-Context-', bool $withW3C = true): array
+    {
+        $headers = [];
+
+        foreach (self::exportForDistributed() as $key => $value) {
+            if (!is_scalar($value) && $value !== null) {
+                continue;
+            }
+
+            $headers[$prefix . str_replace('_', '-', ucwords($key, '_'))] = match (true) {
+                is_bool($value) => $value ? '1' : '0',
+                $value === null => '',
+                default => (string)$value,
+            };
+        }
+
+        if ($withW3C) {
+            $headers += self::toW3CHeaders();
+        }
+
+        return $headers;
+    }
+
+    /**
+     * 从 HTTP Headers 导入上下文（头名大小写不敏感）
+     *
+     * 若同时存在 W3C traceparent，则优先采用 W3C 标准头。
+     *
+     * @param array<string, string> $headers HTTP 头
+     * @param string                $prefix  私有头前缀
      */
     public static function fromHeaders(array $headers, string $prefix = 'X-Context-'): void
     {
+        $normalized = self::normalizeHeaders($headers);
+        $prefixLower = strtolower($prefix);
+        $prefixLen = strlen($prefixLower);
         $data = [];
-        $prefixLen = strlen($prefix);
 
-        foreach ($headers as $name => $value) {
-            if (str_starts_with($name, $prefix)) {
-                $key = strtolower(str_replace('-', '_', substr($name, $prefixLen)));
-                $data[$key] = $value;
+        foreach ($normalized as $name => $value) {
+            if (!str_starts_with($name, $prefixLower)) {
+                continue;
             }
+
+            $key = str_replace('-', '_', substr($name, $prefixLen));
+
+            if ($key === '') {
+                continue;
+            }
+
+            $data[$key] = $key === self::TRACE_FLAGS ? (int)$value : $value;
         }
 
-        self::import($data, true);
+        if ($data !== []) {
+            self::import($data, true);
+        }
+
+        if (isset($normalized['traceparent'])) {
+            self::fromW3CHeaders($normalized);
+        }
     }
 
     /**
-     * 实现 JsonSerializable 接口
+     * 从任意来源的头部继续链路：优先 W3C，回退私有协议
      *
-     * @return array<string, mixed>
+     * @param array<string, string> $headers
      */
-    public function jsonSerialize(): array
+    public static function continueTrace(array $headers, string $prefix = 'X-Context-'): void
     {
-        return self::export();
+        self::fromHeaders($headers, $prefix);
+
+        if (!self::has(self::TRACE_ID)) {
+            self::startTrace();
+        }
     }
 
-    // ==================== 私有方法 ====================
+    // ==================== 私有实现 ====================
 
     /**
-     * 初始化存储机制
+     * 取得当前执行单元独占的存储
      */
-    private static function initStorage(): void
+    private static function store(): ContextStore
     {
-        if (self::$initialized) {
-            return;
+        $scope = self::currentScope();
+
+        if ($scope === null) {
+            return self::$rootStore ??= new ContextStore();
         }
 
-        // 优先检查 Fiber
-        if (PHP_VERSION_ID >= 80300 && class_exists(Fiber::class)) {
-            $fiber = Fiber::getCurrent();
-            if ($fiber !== null) {
-                self::initFiberStorage($fiber);
-                self::$initialized = true;
-                return;
-            }
+        $map = self::$scopedStores ??= new WeakMap();
+
+        if (!isset($map[$scope])) {
+            $map[$scope] = new ContextStore();
         }
 
-        // 检查 Swoole 协程
-        if (extension_loaded('swoole')) {
-            $cid = \Swoole\Coroutine::getCid();
-            if ($cid !== -1) {
-                $ctx = \Swoole\Coroutine::getContext();
-                if (!isset($ctx['context'])) {
-                    $ctx['context'] = [];
-                }
-                self::$local = &$ctx['context'];
-                self::$initialized = true;
-                return;
-            }
-        }
-
-        // 检查 Swow 协程
-        if (extension_loaded('swow') && class_exists(\Swow\Coroutine::class)) {
-            $co = \Swow\Coroutine::getCurrent();
-            if ($co !== null) {
-                $local = $co->getLocal();
-                if (!isset($local['context'])) {
-                    $local['context'] = [];
-                }
-                self::$local = &$local['context'];
-                self::$initialized = true;
-                return;
-            }
-        }
-
-        // 检查多线程环境
-        if (self::isThreadEnvironment()) {
-            self::initThreadStorage();
-            self::$initialized = true;
-            return;
-        }
-
-        // 默认使用全局存储
-        if (!isset($GLOBALS['__kode_context'])) {
-            $GLOBALS['__kode_context'] = [];
-        }
-        self::$local = &$GLOBALS['__kode_context'];
-        self::$initialized = true;
+        return $map[$scope];
     }
 
     /**
-     * 初始化 Fiber 存储
+     * 解析当前执行单元对应的作用域对象
      *
-     * PHP 8.3+ 的 Fiber::getLocal() 方法需要通过反射调用
-     *
-     * @param Fiber $fiber 当前 Fiber 实例
+     * 返回 null 表示处于主执行单元（同步 / 进程 / 线程根），使用根存储。
      */
-    private static function initFiberStorage(Fiber $fiber): void
-    {
-        try {
-            $reflector = new ReflectionClass($fiber);
-            if ($reflector->hasMethod('getLocal')) {
-                $method = $reflector->getMethod('getLocal');
-                $method->setAccessible(true);
-                /** @var array<string, mixed> $localData */
-                $localData = $method->invoke($fiber);
-                if (!isset($localData['context'])) {
-                    $localData['context'] = [];
-                }
-                self::$local = &$localData['context'];
-                return;
-            }
-        } catch (ReflectionException) {
-        }
-
-        if (!isset($GLOBALS['__kode_fiber_context'])) {
-            $GLOBALS['__kode_fiber_context'] = [];
-        }
-        $fiberId = spl_object_id($fiber);
-        if (!isset($GLOBALS['__kode_fiber_context'][$fiberId])) {
-            $GLOBALS['__kode_fiber_context'][$fiberId] = [];
-        }
-        self::$local = &$GLOBALS['__kode_fiber_context'][$fiberId];
-    }
-
-    /**
-     * 初始化线程存储
-     */
-    private static function initThreadStorage(): void
-    {
-        $threadId = self::getThreadId();
-
-        if ($threadId === null) {
-            return;
-        }
-
-        if (!isset(self::$threadContexts[$threadId])) {
-            self::$threadContexts[$threadId] = [];
-        }
-
-        self::$local = &self::$threadContexts[$threadId];
-    }
-
-    /**
-     * 检查是否在 Swoole 协程中
-     */
-    private static function isSwooleCoroutine(): bool
-    {
-        return \Swoole\Coroutine::getCid() !== -1;
-    }
-
-    /**
-     * 检查是否在 Swow 协程中
-     */
-    private static function isSwowCoroutine(): bool
-    {
-        return class_exists(\Swow\Coroutine::class) && \Swow\Coroutine::getCurrent() !== null;
-    }
-
-    /**
-     * 获取 Fiber ID
-     */
-    private static function getFiberId(): ?int
+    private static function currentScope(): ?object
     {
         $fiber = Fiber::getCurrent();
-        return $fiber !== null ? spl_object_id($fiber) : null;
+
+        if ($fiber !== null) {
+            return $fiber;
+        }
+
+        if (self::swooleLoaded() && self::swooleCid() > 0) {
+            /** @var object|null $ctx */
+            $ctx = \Swoole\Coroutine::getContext();
+
+            if (is_object($ctx)) {
+                return $ctx;
+            }
+        }
+
+        if (self::swowLoaded()) {
+            return self::swowCurrent();
+        }
+
+        return null;
     }
 
     /**
-     * 获取 Swoole 协程 ID
-     */
-    private static function getSwooleCoroutineId(): int
-    {
-        /** @phpstan-ignore-next-line */
-        return \Swoole\Coroutine::getCid();
-    }
-
-    /**
-     * 获取 Swow 协程 ID
-     */
-    private static function getSwowCoroutineId(): int
-    {
-        $co = \Swow\Coroutine::getCurrent();
-        return $co !== null ? spl_object_id($co) : -1;
-    }
-
-    /**
-     * 触发上下文变更监听器
+     * 触发监听器（含通配符）
      */
     private static function triggerListener(string $key, mixed $oldValue, mixed $newValue): void
     {
-        if (!isset(self::$listeners[$key])) {
+        if (self::$listeners === []) {
             return;
         }
 
-        foreach (self::$listeners[$key] as $listener) {
+        $listeners = self::$listeners[$key] ?? [];
+
+        if (isset(self::$listeners[self::WILDCARD])) {
+            $listeners += self::$listeners[self::WILDCARD];
+        }
+
+        foreach ($listeners as $listener) {
             try {
                 $listener($key, $oldValue, $newValue);
             } catch (Throwable) {
+                // 监听器异常不应影响上下文写入主流程
             }
         }
     }
 
     /**
-     * 序列化单个值
+     * 回收一个已完成的子进程并读取其结果
+     *
+     * @param array<int, array{key: array-key, stream: resource}> $running
+     * @param array<array-key, mixed>                             $results
+     * @param array<array-key, string>                            $errors
      */
-    private static function serializeValue(mixed $value): mixed
+    private static function collectProcess(array &$running, array &$results, array &$errors): void
     {
-        if ($value === null || is_scalar($value)) {
-            return $value;
+        $pid = array_key_first($running);
+
+        if ($pid === null) {
+            return;
         }
 
-        if (is_array($value)) {
-            return array_map(self::serializeValue(...), $value);
+        $entry = $running[$pid];
+        unset($running[$pid]);
+
+        $raw = stream_get_contents($entry['stream']);
+        fclose($entry['stream']);
+
+        $status = 0;
+        pcntl_waitpid($pid, $status);
+
+        if (!is_string($raw) || $raw === '') {
+            $errors[$entry['key']] = '子进程未返回任何结果';
+            $results[$entry['key']] = null;
+
+            return;
         }
 
-        if ($value instanceof \DateTimeInterface) {
-            return [
-                '__type__' => 'datetime',
-                'value' => $value->format(\DateTimeInterface::ATOM),
-            ];
+        /** @var mixed $payload */
+        $payload = @unserialize($raw, ['allowed_classes' => true]);
+
+        if (!is_array($payload) || !isset($payload['ok'])) {
+            $errors[$entry['key']] = '子进程返回数据无法解析';
+            $results[$entry['key']] = null;
+
+            return;
         }
 
-        if ($value instanceof \BackedEnum) {
-            return [
-                '__type__' => 'enum',
-                'class' => get_class($value),
-                'value' => $value->value,
-            ];
+        if ($payload['ok'] === true) {
+            $results[$entry['key']] = $payload['value'] ?? null;
+
+            return;
         }
 
-        if (is_object($value)) {
-            if ($value instanceof JsonSerializable) {
-                return [
-                    '__type__' => 'json_serializable',
-                    'class' => get_class($value),
-                    'value' => $value->jsonSerialize(),
-                ];
-            }
-
-            return [
-                '__type__' => 'object',
-                'class' => get_class($value),
-            ];
-        }
-
-        if (is_resource($value)) {
-            return [
-                '__type__' => 'resource',
-                'type' => get_resource_type($value),
-            ];
-        }
-
-        return $value;
+        $message = $payload['error'] ?? '未知错误';
+        $errors[$entry['key']] = is_string($message) ? $message : '未知错误';
+        $results[$entry['key']] = null;
     }
 
     /**
-     * 反序列化单个值
+     * 断言 pcntl 可用
+     *
+     * @throws ContextException
      */
-    private static function unserializeValue(mixed $value): mixed
+    private static function assertPcntl(): void
     {
-        if (!is_array($value) || !isset($value['__type__'])) {
-            if (is_array($value)) {
-                return array_map(self::unserializeValue(...), $value);
-            }
-            return $value;
+        if (!function_exists('pcntl_fork')) {
+            throw ContextException::missingExtension('pcntl', '多进程功能');
+        }
+    }
+
+    /**
+     * 是否处于多线程环境
+     */
+    private static function isThreadEnvironment(): bool
+    {
+        return defined('ZEND_THREAD_SAFE') && ZEND_THREAD_SAFE === true && self::parallelLoaded();
+    }
+
+    /**
+     * 头部名归一化为小写
+     *
+     * @param array<string, string> $headers
+     * @return array<string, string>
+     */
+    private static function normalizeHeaders(array $headers): array
+    {
+        $normalized = [];
+
+        foreach ($headers as $name => $value) {
+            $normalized[strtolower($name)] = $value;
         }
 
-        return match ($value['__type__']) {
-            'datetime' => new \DateTimeImmutable($value['value']),
-            'enum' => class_exists($value['class'])
-                ? ($value['class'])::from($value['value'])
-                : $value['value'],
-            'object', 'json_serializable' => $value['value'] ?? null,
-            'resource' => null,
-            default => $value['value'] ?? $value,
-        };
+        return $normalized;
     }
 
     /**
-     * 生成 Trace ID
+     * 解析当前 baggage
+     *
+     * @return array<string, string>
      */
-    private static function generateTraceId(): string
+    private static function baggageEntries(): array
     {
-        return bin2hex(random_bytes(16));
+        $raw = self::get(self::BAGGAGE);
+
+        return is_string($raw) ? TraceContext::parseBaggage($raw) : [];
+    }
+
+    private static function fiberId(): ?int
+    {
+        $fiber = Fiber::getCurrent();
+
+        return $fiber === null ? null : spl_object_id($fiber);
+    }
+
+    private static function swooleLoaded(): bool
+    {
+        return self::$hasSwoole ??= extension_loaded('swoole') && class_exists('\Swoole\Coroutine');
+    }
+
+    private static function swowLoaded(): bool
+    {
+        return self::$hasSwow ??= extension_loaded('swow') && class_exists('\Swow\Coroutine');
+    }
+
+    private static function parallelLoaded(): bool
+    {
+        return self::$hasParallel ??= extension_loaded('parallel') && class_exists('\parallel\Runtime');
+    }
+
+    private static function swooleCid(): int
+    {
+        /** @var int $cid */
+        $cid = \Swoole\Coroutine::getCid();
+
+        return $cid;
     }
 
     /**
-     * 生成 Span ID
+     * 当前 Swow 协程，主协程视为根作用域返回 null
      */
-    private static function generateSpanId(): string
+    private static function swowCurrent(): ?object
     {
-        return bin2hex(random_bytes(8));
+        /** @var object|null $current */
+        $current = \Swow\Coroutine::getCurrent();
+
+        if (!is_object($current)) {
+            return null;
+        }
+
+        /** @var object|null $main */
+        $main = \Swow\Coroutine::getMain();
+
+        return $current === $main ? null : $current;
+    }
+
+    private static function swowCoroutineId(): ?int
+    {
+        $current = self::swowCurrent();
+
+        return $current === null ? null : spl_object_id($current);
     }
 }

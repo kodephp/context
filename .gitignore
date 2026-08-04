@@ -4,13 +4,19 @@
 # Testing
 /phpunit.xml
 /.phpunit.cache/
+/.phpunit.result.cache
+/coverage/
 /phpstan.neon.tmp
 phpstan.neon
 
-# IDE
+# IDE / 本地工具
 /.idea/
 /.vscode/
 .trae
+.workbuddy/
+
+# 本地文档（不入库）
+CHANGELOG.md
 
 # OS
 .DS_Store

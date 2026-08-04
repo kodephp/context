@@ -5,23 +5,29 @@ declare(strict_types=1);
 namespace Kode\Context;
 
 use RuntimeException;
+use Throwable;
 
 /**
- * 上下文异常类
- *
- * 当上下文操作出现问题时抛出此异常
+ * 上下文异常
  *
  * @package Kode\Context
  * @author  KodePHP <382601296@qq.com>
  * @license Apache-2.0
  */
-final class ContextException extends RuntimeException
+class ContextException extends RuntimeException
 {
     /**
-     * 创建键不存在异常
-     *
-     * @param string $key 键名
-     * @return self
+     * @param string         $message  异常消息
+     * @param int            $code     异常码
+     * @param Throwable|null $previous 上一个异常
+     */
+    public function __construct(string $message = '', int $code = 0, ?Throwable $previous = null)
+    {
+        parent::__construct($message, $code, $previous);
+    }
+
+    /**
+     * 键不存在
      */
     public static function keyNotFound(string $key): self
     {
@@ -29,28 +35,36 @@ final class ContextException extends RuntimeException
     }
 
     /**
-     * 创建类型不匹配异常
-     *
-     * @param string $key          键名
-     * @param string $expectedType 期望类型
-     * @param string $actualType   实际类型
-     * @return self
+     * 类型不匹配
      */
-    public static function typeMismatch(string $key, string $expectedType, string $actualType): self
+    public static function typeMismatch(string $key, string $expected, mixed $actual): self
     {
         return new self(
-            "上下文键 '{$key}' 的值不是 {$expectedType} 类型，实际类型为 {$actualType}"
+            "上下文键 '{$key}' 的值不是 {$expected} 类型，实际类型为 " . get_debug_type($actual)
         );
     }
 
     /**
-     * 创建无效操作异常
-     *
-     * @param string $message 错误消息
-     * @return self
+     * 缺少扩展
      */
-    public static function invalidOperation(string $message): self
+    public static function missingExtension(string $extension, string $feature): self
     {
-        return new self($message);
+        return new self("{$extension} 扩展未安装，无法使用{$feature}");
+    }
+
+    /**
+     * 序列化失败
+     */
+    public static function serializeFailed(string $reason, ?Throwable $previous = null): self
+    {
+        return new self('上下文序列化失败: ' . $reason, 0, $previous);
+    }
+
+    /**
+     * 反序列化失败
+     */
+    public static function unserializeFailed(string $reason, ?Throwable $previous = null): self
+    {
+        return new self('上下文反序列化失败: ' . $reason, 0, $previous);
     }
 }
