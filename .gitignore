@@ -16,7 +16,7 @@ phpstan.neon
 .workbuddy/
 
 # 本地文档（不入库）
-CHANGELOG.md
+# 注：CHANGELOG.md 现已随版本发布进入仓库（见文件顶部说明）
 
 # OS
 .DS_Store
