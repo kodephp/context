@@ -1,8 +1,10 @@
 # kode/context - PHP 协程/纤程上下文管理包
 
-[![PHP Version](https://img.shields.io/badge/PHP-8.3%2B-blue)](https://php.net)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
-[![Latest Version](https://img.shields.io/packagist/v/kode/context)](https://packagist.org/packages/kode/context)
+![PHP Version](https://img.shields.io/badge/PHP-8.3%2B-blue)
+
+![License](https://img.shields.io/badge/License-Apache%202.0-green)
+
+![Latest Version](https://img.shields.io/packagist/v/kode/context)
 
 > **为多线程、多进程、协程（Swoole/Swow/Fiber）环境提供安全的请求上下文传递机制，支持分布式多机器部署**
 
@@ -29,14 +31,14 @@
 
 ## 🎯 为什么需要 `kode/context`？
 
-| 场景 | 问题 | 解决方案 |
-|------|------|----------|
-| 原生 PHP + 多进程 | 进程隔离，无需担心共享状态 | ✅ 安全 |
-| 原生 PHP + 多线程（ZTS） | 线程共享内存，`static` 被所有线程共享 | ❌ 存在风险 |
-| Swoole 协程 | 协程共享线程内存，`static` 被复用 | ❌ 极易污染 |
-| Swow 协程 | 同上，绿色线程模型 | ❌ 存在上下文混淆 |
-| PHP 8.3+ Fiber | Fiber 共享调用栈中的 `static` 变量 | ❌ 数据交叉污染 |
-| **分布式多机器** | 跨节点调用时上下文丢失 | ✅ **序列化传递** |
+| 场景                | 问题                        | 解决方案        |
+| ----------------- | ------------------------- | ----------- |
+| 原生 PHP + 多进程      | 进程隔离，无需担心共享状态             | ✅ 安全        |
+| 原生 PHP + 多线程（ZTS） | 线程共享内存，`static` 被所有线程共享   | ❌ 存在风险      |
+| Swoole 协程         | 协程共享线程内存，`static` 被复用     | ❌ 极易污染      |
+| Swow 协程           | 同上，绿色线程模型                 | ❌ 存在上下文混淆   |
+| PHP 8.3+ Fiber    | Fiber 共享调用栈中的 `static` 变量 | ❌ 数据交叉污染    |
+| **分布式多机器**        | 跨节点调用时上下文丢失               | ✅ **序列化传递** |
 
 👉 **结论：只要存在"并发执行单元共享主线程内存"的情况，就必须使用上下文隔离机制！**
 
@@ -171,14 +173,14 @@ $scope->close(); // 或等 $scope 被 GC 时自动回滚
 
 ## ⚙️ 实现原理（按运行时自动适配）
 
-| 运行时环境 | 上下文存储机制 | 说明 |
-|-----------|----------------|------|
-| **PHP Fiber (8.3+)** | `WeakMap<Fiber, ContextStore>` | 以当前 Fiber 对象为键持有独立存储，Fiber 回收后自动释放 |
-| **Swoole** | `WeakMap<Coroutine, ContextStore>` | 基于协程对象绑定独立存储 |
-| **Swow** | `WeakMap<Coroutine, ContextStore>` | 基于协程对象绑定独立存储 |
-| **多线程 (ZTS)** | 线程 ID + 独立存储 | 支持 parallel 扩展（ZTS 构建） |
-| **多进程** | 进程 ID + fork 继承 | 支持 pcntl_fork |
-| **普通同步环境** | 全局根存储 | 单线程安全，兼容 CLI/HTTP |
+| 运行时环境                | 上下文存储机制                            | 说明                                 |
+| -------------------- | ---------------------------------- | ---------------------------------- |
+| **PHP Fiber (8.3+)** | `WeakMap<Fiber, ContextStore>`     | 以当前 Fiber 对象为键持有独立存储，Fiber 回收后自动释放 |
+| **Swoole**           | `WeakMap<Coroutine, ContextStore>` | 基于协程对象绑定独立存储                       |
+| **Swow**             | `WeakMap<Coroutine, ContextStore>` | 基于协程对象绑定独立存储                       |
+| **多线程 (ZTS)**        | 线程 ID + 独立存储                       | 支持 parallel 扩展（ZTS 构建）             |
+| **多进程**              | 进程 ID + fork 继承                    | 支持 pcntl_fork                      |
+| **普通同步环境**           | 全局根存储                              | 单线程安全，兼容 CLI/HTTP                  |
 
 > ✅ v3.0 起，所有并发运行时统一采用 **`WeakMap<执行单元对象, 上下文存储>`** 实现真正的「每执行单元独占隔离」，从根本上修复了旧版 Fiber 共享存储导致的数据污染问题（旧版 `static` 全局标志 + 引用绑定会在多个 Fiber 间串数据）。
 
@@ -334,6 +336,8 @@ $results = Context::parallelProcesses([
     ],
 ]);
 ```
+
+
 
 ---
 
@@ -511,144 +515,147 @@ $result = Fibers::scheduleDistributedRemote(
 
 ### 基础操作
 
-| 方法 | 说明 |
-|------|------|
-| `Context::set(string $key, mixed $value): void` | 设置上下文值 |
-| `Context::get(string $key, mixed $default = null): mixed` | 获取上下文值 |
-| `Context::has(string $key): bool` | 判断键是否存在 |
-| `Context::delete(string $key): void` | 删除指定键 |
-| `Context::clear(): void` | 清空当前上下文 |
+| 方法                                                        | 说明      |
+| --------------------------------------------------------- | ------- |
+| `Context::set(string $key, mixed $value): void`           | 设置上下文值  |
+| `Context::get(string $key, mixed $default = null): mixed` | 获取上下文值  |
+| `Context::has(string $key): bool`                         | 判断键是否存在 |
+| `Context::hasAll(array $keys): bool`                      | 判断所有指定键是否均存在（空数组返回 true） |
+| `Context::hasAny(array $keys): bool`                      | 判断是否存在任意一个指定键（空数组返回 false） |
+| `Context::delete(string $key): void`                      | 删除指定键   |
+| `Context::clear(): void`                                  | 清空当前上下文 |
 
 ### 批量操作
 
-| 方法 | 说明 |
-|------|------|
-| `Context::copy(): array` | 复制当前上下文为数组快照 |
-| `Context::restore(array $snapshot): void` | 从快照恢复上下文 |
-| `Context::merge(array $data, bool $overwrite = true): void` | 合并数据到上下文 |
-| `Context::keys(): array` | 获取所有键名 |
-| `Context::count(): int` | 获取键值对数量 |
-| `Context::all(): array` | 获取所有数据 |
+| 方法                                                          | 说明           |
+| ----------------------------------------------------------- | ------------ |
+| `Context::copy(): array`                                    | 复制当前上下文为数组快照 |
+| `Context::restore(array $snapshot): void`                   | 从快照恢复上下文     |
+| `Context::merge(array $data, bool $overwrite = true): void` | 合并数据到上下文     |
+| `Context::keys(): array`                                    | 获取所有键名       |
+| `Context::count(): int`                                     | 获取键值对数量      |
+| `Context::all(): array`                                     | 获取所有数据       |
 
 ### 作用域操作
 
-| 方法 | 说明 |
-|------|------|
-| `Context::run(callable $callable): mixed` | 在隔离作用域中执行 |
-| `Context::fork(callable $callable): mixed` | 在继承作用域中执行 |
-| `Context::runWith(array $initial, callable $callable): mixed` | 以指定初始数据运行隔离作用域 |
-| `Context::with(array $values, callable $callable): mixed` | 批量注入键值后运行隔离作用域 |
-| `Context::enter(?array $initial = null): ContextScope` | 进入作用域，返回 RAII 句柄（自动回滚） |
-| `Context::bind(callable $callable, ?array $snapshot = null): Closure` | 绑定当前上下文到闭包，跨执行单元透传 |
-| `Context::depth(): int` | 当前作用域嵌套深度 |
+| 方法                                                                    | 说明                     |
+| --------------------------------------------------------------------- | ---------------------- |
+| `Context::run(callable $callable): mixed`                             | 在隔离作用域中执行              |
+| `Context::fork(callable $callable): mixed`                            | 在继承作用域中执行              |
+| `Context::runWith(array $initial, callable $callable): mixed`         | 以指定初始数据运行隔离作用域         |
+| `Context::with(array $values, callable $callable): mixed`             | 批量注入键值后运行隔离作用域         |
+| `Context::enter(?array $initial = null): ContextScope`                | 进入作用域，返回 RAII 句柄（自动回滚） |
+| `Context::bind(callable $callable, ?array $snapshot = null): Closure` | 绑定当前上下文到闭包，跨执行单元透传     |
+| `Context::depth(): int`                                               | 当前作用域嵌套深度              |
+| `Context::transaction(callable $callback): mixed`                     | 在当前上下文执行回调，无论成功/异常均自动回滚到进入前快照 |
 
 ### 类型安全
 
-| 方法 | 说明 |
-|------|------|
-| `Context::getOfType(string $key, string $type): object` | 获取并断言对象类型 |
-| `Context::getString(string $key, ?string $default = null): ?string` | 类型安全获取字符串 |
-| `Context::getInt(string $key, ?int $default = null): ?int` | 类型安全获取整数 |
-| `Context::getFloat(string $key, ?float $default = null): ?float` | 类型安全获取浮点 |
-| `Context::getBool(string $key, ?bool $default = null): ?bool` | 类型安全获取布尔 |
-| `Context::getArray(string $key, ?array $default = null): ?array` | 类型安全获取数组 |
-| `Context::getOrFail(string $key): mixed` | 获取，缺失即抛 `ContextException` |
+| 方法                                                                  | 说明                         |
+| ------------------------------------------------------------------- | -------------------------- |
+| `Context::getOfType(string $key, string $type): object`             | 获取并断言对象类型                  |
+| `Context::getString(string $key, ?string $default = null): ?string` | 类型安全获取字符串                  |
+| `Context::getInt(string $key, ?int $default = null): ?int`          | 类型安全获取整数                   |
+| `Context::getFloat(string $key, ?float $default = null): ?float`    | 类型安全获取浮点                   |
+| `Context::getBool(string $key, ?bool $default = null): ?bool`       | 类型安全获取布尔                   |
+| `Context::getArray(string $key, ?array $default = null): ?array`    | 类型安全获取数组                   |
+| `Context::getOrFail(string $key): mixed`                            | 获取，缺失即抛 `ContextException` |
 
 ### 便捷 API
 
-| 方法 | 说明 |
-|------|------|
-| `Context::getOrSet(string $key, Closure $factory): mixed` | 不存在则惰性生成并写入 |
-| `Context::add(string $key, mixed $value): bool` | 原子追加到集合（不存在则创建数组） |
-| `Context::pull(string $key, mixed $default = null): mixed` | 取值并删除 |
-| `Context::increment(string $key, int\|float $step = 1): int\|float` | 自增（支持浮点） |
-| `Context::decrement(string $key, int\|float $step = 1): int\|float` | 自减 |
-| `Context::push(string $key, mixed ...$values): void` | 批量压入数组 |
-| `Context::only(array $keys): array` | 仅保留指定键的快照 |
-| `Context::except(array $keys): array` | 排除指定键的快照 |
+| 方法                                                                  | 说明                |
+| ------------------------------------------------------------------- | ----------------- |
+| `Context::getOrSet(string $key, Closure $factory): mixed`           | 不存在则惰性生成并写入       |
+| `Context::add(string $key, mixed $value): bool`                     | 原子追加到集合（不存在则创建数组） |
+| `Context::pull(string $key, mixed $default = null): mixed`          | 取值并删除             |
+| `Context::increment(string $key, int\|float $step = 1): int\|float` | 自增（支持浮点）          |
+| `Context::decrement(string $key, int\|float $step = 1): int\|float` | 自减                |
+| `Context::push(string $key, mixed ...$values): void`                | 批量压入数组            |
+| `Context::only(array $keys): array`                                 | 仅保留指定键的快照         |
+| `Context::except(array $keys): array`                               | 排除指定键的快照          |
 
 ### 监听器
 
-| 方法 | 说明 |
-|------|------|
-| `Context::listen(string $key, Closure $listener): string` | 注册变更监听器，返回监听 ID（`*` 为通配） |
-| `Context::unlisten(string $key, ?string $id = null): void` | 移除监听器 |
-| `Context::listenedKeys(): array` | 当前已注册监听的键列表 |
+| 方法                                                         | 说明                       |
+| ---------------------------------------------------------- | ------------------------ |
+| `Context::listen(string $key, Closure $listener): string`  | 注册变更监听器，返回监听 ID（`*` 为通配） |
+| `Context::unlisten(string $key, ?string $id = null): void` | 移除监听器                    |
+| `Context::listenedKeys(): array`                           | 当前已注册监听的键列表              |
 
 ### 运行时信息
 
-| 方法 | 说明 |
-|------|------|
-| `Context::runtime(): Runtime` | 获取运行时枚举对象 |
-| `Context::getRuntime(): string` | 获取运行时类型 |
-| `Context::isCoroutine(): bool` | 是否在协程环境 |
-| `Context::isThread(): bool` | 是否在线程环境 |
-| `Context::isProcess(): bool` | 是否在进程环境 |
-| `Context::isMain(): bool` | 是否主执行单元（非子 Fiber/协程/线程） |
-| `Context::isPostFork(): bool` | 是否处于 fork 之后 |
-| `Context::getExecutionId(): int\|string\|null` | 获取执行单元 ID |
-| `Context::getCoroutineId(): int\|string\|null` | 获取协程 ID |
-| `Context::getProcessId(): int` | 获取进程 ID |
-| `Context::getThreadId(): ?int` | 获取线程 ID |
+| 方法                                             | 说明                      |
+| ---------------------------------------------- | ----------------------- |
+| `Context::runtime(): Runtime`                  | 获取运行时枚举对象               |
+| `Context::getRuntime(): string`                | 获取运行时类型                 |
+| `Context::isCoroutine(): bool`                 | 是否在协程环境                 |
+| `Context::isThread(): bool`                    | 是否在线程环境                 |
+| `Context::isProcess(): bool`                   | 是否在进程环境                 |
+| `Context::isMain(): bool`                      | 是否主执行单元（非子 Fiber/协程/线程） |
+| `Context::isPostFork(): bool`                  | 是否处于 fork 之后            |
+| `Context::getExecutionId(): int\|string\|null` | 获取执行单元 ID               |
+| `Context::getCoroutineId(): int\|string\|null` | 获取协程 ID                 |
+| `Context::getProcessId(): int`                 | 获取进程 ID                 |
+| `Context::getThreadId(): ?int`                 | 获取线程 ID                 |
 
 ### 多进程操作
 
-| 方法 | 说明 |
-|------|------|
-| `Context::prepareFork(): void` | 准备 fork 前的上下文快照 |
-| `Context::afterFork(bool $inherit = true): void` | fork 后初始化子进程上下文 |
-| `Context::runInProcess(callable $task, bool $inherit = true): int` | 在子进程中运行任务，返回 PID |
-| `Context::waitProcess(int $pid): int` | 等待指定子进程结束 |
-| `Context::parallelProcesses(array $tasks, int $max = 4, bool $inherit = true): array` | 进程池并行执行 |
+| 方法                                                                                    | 说明               |
+| ------------------------------------------------------------------------------------- | ---------------- |
+| `Context::prepareFork(): void`                                                        | 准备 fork 前的上下文快照  |
+| `Context::afterFork(bool $inherit = true): void`                                      | fork 后初始化子进程上下文  |
+| `Context::runInProcess(callable $task, bool $inherit = true): int`                    | 在子进程中运行任务，返回 PID |
+| `Context::waitProcess(int $pid): int`                                                 | 等待指定子进程结束        |
+| `Context::parallelProcesses(array $tasks, int $max = 4, bool $inherit = true): array` | 进程池并行执行          |
 
 ### 多线程操作
 
-| 方法 | 说明 |
-|------|------|
-| `Context::runInThread(callable $task, bool $inherit = true): object` | 在线程中运行任务，返回 `parallel\Future` |
-| `Context::parallelThreads(array $tasks, int $max = 4, bool $inherit = true): array` | 线程池并行执行 |
+| 方法                                                                                  | 说明                            |
+| ----------------------------------------------------------------------------------- | ----------------------------- |
+| `Context::runInThread(callable $task, bool $inherit = true): object`                | 在线程中运行任务，返回 `parallel\Future` |
+| `Context::parallelThreads(array $tasks, int $max = 4, bool $inherit = true): array` | 线程池并行执行                       |
 
 ### 分布式操作
 
-| 方法 | 说明 |
-|------|------|
-| `Context::toJson(array $onlyKeys = []): string` | 序列化为 JSON |
-| `Context::fromJson(string $json, bool $merge = false): array` | 从 JSON 反序列化 |
-| `Context::export(array $onlyKeys = []): array` | 导出可序列化数据 |
-| `Context::import(array $data, bool $merge = false): array` | 导入数据 |
-| `Context::startTrace(?string $traceId = null, ?string $nodeId = null): string` | 启动内部追踪 |
-| `Context::startSpan(): string` | 创建子 Span |
-| `Context::getTraceInfo(): array` | 获取追踪信息 |
-| `Context::isSampled(): bool` | 是否采样 |
-| `Context::setSampled(bool $sampled = true): void` | 设置采样标志 |
-| `Context::toTraceparent(): ?string` | 导出 W3C `traceparent` |
-| `Context::fromTraceparent(string $traceparent, ?string $tracestate = null): bool` | 从 `traceparent` 继承（创建子 span） |
-| `Context::setBaggage(string $key, string $value): void` | 设置 W3C `baggage` 键值 |
-| `Context::getBaggage(?string $key = null): array\|string\|null` | 读取 `baggage` |
-| `Context::toW3CHeaders(): array` | 导出 `traceparent`/`tracestate`/`baggage` 为 HTTP Header |
-| `Context::fromW3CHeaders(array $headers): bool` | 从 HTTP Header 还原 W3C 上下文 |
-| `Context::toHeaders(string $prefix = 'X-Context-'): array` | 导出为自定义 Headers |
-| `Context::fromHeaders(array $headers, string $prefix = 'X-Context-'): void` | 从自定义 Headers 导入 |
-| `Context::continueTrace(array $headers, string $prefix = 'X-Context-'): void` | 从上游 Header 继续追踪链路 |
-| `Context::getDistributedKeys(): array` | 获取分布式键 |
-| `Context::exportForDistributed(): array` | 导出分布式上下文 |
+| 方法                                                                                | 说明                                                    |
+| --------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `Context::toJson(array $onlyKeys = []): string`                                   | 序列化为 JSON                                             |
+| `Context::fromJson(string $json, bool $merge = false): array`                     | 从 JSON 反序列化                                           |
+| `Context::export(array $onlyKeys = []): array`                                    | 导出可序列化数据                                              |
+| `Context::import(array $data, bool $merge = false): array`                        | 导入数据                                                  |
+| `Context::startTrace(?string $traceId = null, ?string $nodeId = null): string`    | 启动内部追踪                                                |
+| `Context::startSpan(): string`                                                    | 创建子 Span                                              |
+| `Context::getTraceInfo(): array`                                                  | 获取追踪信息                                                |
+| `Context::isSampled(): bool`                                                      | 是否采样                                                  |
+| `Context::setSampled(bool $sampled = true): void`                                 | 设置采样标志                                                |
+| `Context::toTraceparent(): ?string`                                               | 导出 W3C `traceparent`                                  |
+| `Context::fromTraceparent(string $traceparent, ?string $tracestate = null): bool` | 从 `traceparent` 继承（创建子 span）                          |
+| `Context::setBaggage(string $key, string $value): void`                           | 设置 W3C `baggage` 键值                                   |
+| `Context::getBaggage(?string $key = null): array\|string\|null`                   | 读取 `baggage`                                          |
+| `Context::toW3CHeaders(): array`                                                  | 导出 `traceparent`/`tracestate`/`baggage` 为 HTTP Header |
+| `Context::fromW3CHeaders(array $headers): bool`                                   | 从 HTTP Header 还原 W3C 上下文                              |
+| `Context::toHeaders(string $prefix = 'X-Context-'): array`                        | 导出为自定义 Headers                                        |
+| `Context::fromHeaders(array $headers, string $prefix = 'X-Context-'): void`       | 从自定义 Headers 导入                                       |
+| `Context::continueTrace(array $headers, string $prefix = 'X-Context-'): void`     | 从上游 Header 继续追踪链路                                     |
+| `Context::getDistributedKeys(): array`                                            | 获取分布式键                                                |
+| `Context::exportForDistributed(): array`                                          | 导出分布式上下文                                              |
 
 ### 安全序列化（ValueSerializer）
 
 跨进程 / 跨节点传递时用于安全编解码，默认不还原未知对象为实例（防注入）。
 
-| 方法 | 说明 |
-|------|------|
-| `ValueSerializer::allow(string ...$classes): void` | 将类型加入可信还原白名单 |
-| `ValueSerializer::register(string $class, Closure $encode, Closure $decode): void` | 注册自定义编解码器 |
-| `ValueSerializer::isAllowed(string $class): bool` | 是否在白名单 |
-| `ValueSerializer::encode(mixed $value): mixed` | 安全编码 |
-| `ValueSerializer::decode(mixed $value): mixed` | 安全还原（恶意载荷降级为数组） |
+| 方法                                                                                 | 说明              |
+| ---------------------------------------------------------------------------------- | --------------- |
+| `ValueSerializer::allow(string ...$classes): void`                                 | 将类型加入可信还原白名单    |
+| `ValueSerializer::register(string $class, Closure $encode, Closure $decode): void` | 注册自定义编解码器       |
+| `ValueSerializer::isAllowed(string $class): bool`                                  | 是否在白名单          |
+| `ValueSerializer::encode(mixed $value): mixed`                                     | 安全编码            |
+| `ValueSerializer::decode(mixed $value): mixed`                                     | 安全还原（恶意载荷降级为数组） |
 
 ### 测试辅助
 
-| 方法 | 说明 |
-|------|------|
+| 方法                       | 说明      |
+| ------------------------ | ------- |
 | `Context::reset(): void` | 重置上下文状态 |
 
 ### 常量
@@ -689,13 +696,10 @@ Context::WILDCARD         // '*'  监听所有键的变更
 
 - **Go 的 `context.Context`**  
   提供了 `WithValue`, `WithCancel`, `WithTimeout` 等组合能力，本包聚焦于最核心的 `value` 传递。
-  
 - **Swoole Coroutine\Context**  
   借鉴其基于协程 ID 的上下文映射机制，确保隔离性。
-
 - **Hyperf\Context**  
   对标其静态代理接口设计，提供更简洁的 API。
-
 - **OpenTelemetry**  
   分布式追踪设计参考了 OpenTelemetry 的 Trace/Span 模型。
 
@@ -730,13 +734,13 @@ Context::WILDCARD         // '*'  监听所有键的变更
 
 ## 📦 与其他组件集成建议
 
-| 组件 | 集成方式 |
-|------|----------|
-| Hyperf | 替代 `Hyperf\Context\Context`，作为底层依赖 |
-| Laravel Octane | 在 onRequest 回调中初始化 Context |
-| EasySwoole | 在主服务启动时注册 Context 初始化 |
-| Monolog | 添加 `ProcessContextProcessor` 注入 trace_id |
-| kode/fibers | 作为底层依赖，支持分布式任务调度 |
+| 组件             | 集成方式                                     |
+| -------------- | ---------------------------------------- |
+| Hyperf         | 替代 `Hyperf\Context\Context`，作为底层依赖       |
+| Laravel Octane | 在 onRequest 回调中初始化 Context               |
+| EasySwoole     | 在主服务启动时注册 Context 初始化                    |
+| Monolog        | 添加 `ProcessContextProcessor` 注入 trace_id |
+| kode/fibers    | 作为底层依赖，支持分布式任务调度                         |
 
 ---
 
@@ -746,37 +750,37 @@ Context::WILDCARD         // '*'  监听所有键的变更
 
 ### macOS (Apple Silicon)
 
-| 方法 | 执行时间 | 每秒操作数 |
-|------|---------|----------|
-| `Context::set()` | 8.53ms | 11,723,570 |
-| `Context::get()` | 6.87ms | 14,556,030 |
-| `Context::has()` | 6.53ms | 15,322,044 |
-| `Context::delete()` | 12.44ms | 8,038,464 |
-| `Context::clear()` | 18.80ms | 5,320,011 |
-| `Context::copy()` | 6.64ms | 15,064,102 |
-| `Context::run()` | 36.10ms | 2,770,016 |
-| `Context::fork()` | 42.50ms | 2,352,941 |
-| `Context::toJson()` | ~25ms | ~4,000,000 |
-| `Context::fromJson()` | ~30ms | ~3,300,000 |
+| 方法                    | 执行时间    | 每秒操作数      |
+| --------------------- | ------- | ---------- |
+| `Context::set()`      | 8.53ms  | 11,723,570 |
+| `Context::get()`      | 6.87ms  | 14,556,030 |
+| `Context::has()`      | 6.53ms  | 15,322,044 |
+| `Context::delete()`   | 12.44ms | 8,038,464  |
+| `Context::clear()`    | 18.80ms | 5,320,011  |
+| `Context::copy()`     | 6.64ms  | 15,064,102 |
+| `Context::run()`      | 36.10ms | 2,770,016  |
+| `Context::fork()`     | 42.50ms | 2,352,941  |
+| `Context::toJson()`   | ~25ms   | ~4,000,000 |
+| `Context::fromJson()` | ~30ms   | ~3,300,000 |
 
 **测试环境：** macOS 14.4 (Darwin 24.3.0), Apple M3 Pro (11核), 18GB RAM, PHP 8.3.30, OPcache 启用
 
 ### Linux (x86_64)
 
-| 方法 | 执行时间 | 每秒操作数 |
-|------|---------|----------|
-| `Context::set()` | ~7ms | ~14,000,000 |
-| `Context::get()` | ~5ms | ~20,000,000 |
-| `Context::has()` | ~5ms | ~20,000,000 |
-| `Context::run()` | ~30ms | ~3,300,000 |
-| `Context::fork()` | ~35ms | ~2,800,000 |
+| 方法                | 执行时间  | 每秒操作数       |
+| ----------------- | ----- | ----------- |
+| `Context::set()`  | ~7ms  | ~14,000,000 |
+| `Context::get()`  | ~5ms  | ~20,000,000 |
+| `Context::has()`  | ~5ms  | ~20,000,000 |
+| `Context::run()`  | ~30ms | ~3,300,000  |
+| `Context::fork()` | ~35ms | ~2,800,000  |
 
 **测试环境：** Ubuntu 22.04 LTS, AMD EPYC/Ryzen, PHP 8.2+, OPcache 启用
 
 ### Windows (x86_64)
 
-| 方法 | 执行时间 | 每秒操作数 |
-|------|---------|----------|
+| 方法               | 执行时间 | 每秒操作数       |
+| ---------------- | ---- | ----------- |
 | `Context::set()` | ~9ms | ~11,000,000 |
 | `Context::get()` | ~8ms | ~12,500,000 |
 | `Context::has()` | ~8ms | ~12,500,000 |
@@ -799,7 +803,7 @@ composer run benchmark
 
 欢迎提交 Issue 或 Pull Request！
 
-GitHub: [https://github.com/kodephp/context](https://github.com/kodephp/context)
+GitHub: <https://github.com/kodephp/context>
 
 ---
 

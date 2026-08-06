@@ -204,6 +204,42 @@ final class Context
     }
 
     /**
+     * 判断所有指定键是否均存在
+     *
+     * 空数组视为「全部存在」，返回 true。
+     *
+     * @param list<string> $keys 待检查的键名
+     */
+    public static function hasAll(array $keys): bool
+    {
+        $data = self::store()->data;
+        foreach ($keys as $key) {
+            if (!array_key_exists($key, $data)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 判断是否至少存在一个指定键
+     *
+     * 空数组视为「不存在任意一个」，返回 false。
+     *
+     * @param list<string> $keys 待检查的键名
+     */
+    public static function hasAny(array $keys): bool
+    {
+        $data = self::store()->data;
+        foreach ($keys as $key) {
+            if (array_key_exists($key, $data)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 删除指定键
      */
     public static function delete(string $key): void
@@ -627,6 +663,29 @@ final class Context
     public static function fork(callable $callable): mixed
     {
         return self::runWith(self::store()->data, $callable);
+    }
+
+    /**
+     * 在「事务作用域」内执行回调，结束后自动回滚到进入前的上下文快照
+     *
+     * 与 {@see self::run()}/{@see self::fork()}（创建隔离子作用域）不同，
+     * 本方法在「当前上下文」中执行回调，允许读写外部可见的上下文，
+     * 但无论回调成功、返回还是抛异常，离开作用域时都会恢复进入前的全部键值，
+     * 从而避免临时写入污染调用方上下文。异常会原样向外传播。
+     *
+     * @template T
+     * @param callable(): T $callable 回调
+     * @return T
+     * @throws Throwable 回调抛出的异常会原样向外传递
+     */
+    public static function transaction(callable $callable): mixed
+    {
+        $snapshot = self::copy();
+        try {
+            return $callable();
+        } finally {
+            self::restore($snapshot);
+        }
     }
 
     /**
