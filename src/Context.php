@@ -142,9 +142,26 @@ final class Context
     private static ?int $threadId = null;
 
     /**
+     * 当前是否运行在 parallel 工作线程内（仅在线程内为 true）
+     *
+     * 用于区分「ZTS 构建 + parallel 扩展已加载」与「真正处于 parallel 线程中」，
+     * 避免主线程（即使装了 parallel）被误判为多线程环境。
+     */
+    private static bool $inParallelThread = false;
+
+    /**
      * 是否处于 fork 之后的子进程
      */
     private static bool $postFork = false;
+
+    /**
+     * parallel 工作线程引导文件（vendor/autoload.php）缓存
+     *
+     * parallel 工作线程不继承主线程的自动加载器，必须在创建 Runtime 时显式引导。
+     *
+     * @var string|null
+     */
+    private static ?string $parallelBootstrap = null;
 
     private function __construct()
     {
@@ -1042,7 +1059,7 @@ final class Context
         $status = 0;
         pcntl_waitpid($pid, $status);
 
-        return pcntl_wifexited($status) ? pcntl_wexitstatus($status) : -1;
+        return pcntl_wifexited($status) ? (int)pcntl_wexitstatus($status) : -1;
     }
 
     /**
@@ -1155,13 +1172,20 @@ final class Context
         }
 
         $snapshot = $inheritContext ? self::store()->data : [];
-        $runtime = new \parallel\Runtime();
+        $bootstrap = self::parallelBootstrap();
+        $runtime = $bootstrap === '' ? new \parallel\Runtime() : new \parallel\Runtime($bootstrap);
 
         /** @var object $future */
         $future = $runtime->run(static function () use ($task, $snapshot): mixed {
-            Context::restore($snapshot);
+            Context::$inParallelThread = true;
 
-            return $task();
+            try {
+                Context::restore($snapshot);
+
+                return $task();
+            } finally {
+                Context::$inParallelThread = false;
+            }
         });
 
         return $future;
@@ -1187,25 +1211,65 @@ final class Context
         }
 
         $snapshot = $inheritContext ? self::store()->data : [];
-        $runtimes = [];
-        $futures = [];
-
-        foreach ($tasks as $key => $task) {
-            $index = count($runtimes) % $maxThreads;
-            $runtimes[$index] ??= new \parallel\Runtime();
-
-            $futures[$key] = $runtimes[$index]->run(static function () use ($task, $snapshot): mixed {
-                Context::restore($snapshot);
-
-                return $task();
-            });
-        }
-
         $results = [];
 
-        foreach ($futures as $key => $future) {
-            /** @var object{value: callable(): mixed} $future */
-            $results[$key] = ($future->value)();
+        /**
+         * 有界线程池：每个 runtime 同一时刻只承载一个任务。
+         * 槽位满时优先回收已完成的 runtime；若都在忙则阻塞等待最先提交的那个。
+         *
+         * @var list<array{key: array-key, runtime: \parallel\Runtime, future: \parallel\Future}> $slots
+         */
+        $slots = [];
+
+        foreach ($tasks as $key => $task) {
+            $runtime = null;
+
+            if (count($slots) >= $maxThreads) {
+                foreach ($slots as $i => $slot) {
+                    /** @var \parallel\Future $future */
+                    $future = $slot['future'];
+                    if ($future->done()) {
+                        $results[$slot['key']] = $future->value();
+                        $runtime = $slot['runtime'];
+                        unset($slots[$i]);
+                        break;
+                    }
+                }
+
+                if ($runtime === null) {
+                    $i = array_key_first($slots);
+                    \assert($i !== null);
+                    $slot = $slots[$i];
+                    /** @var \parallel\Future $future */
+                    $future = $slot['future'];
+                    $results[$slot['key']] = $future->value();
+                    $runtime = $slot['runtime'];
+                    unset($slots[$i]);
+                }
+            }
+
+            if ($runtime === null) {
+                $bootstrap = self::parallelBootstrap();
+                $runtime = $bootstrap === '' ? new \parallel\Runtime() : new \parallel\Runtime($bootstrap);
+            }
+
+            $future = $runtime->run(static function () use ($task, $snapshot): mixed {
+                Context::$inParallelThread = true;
+
+                try {
+                    Context::restore($snapshot);
+
+                    return $task();
+                } finally {
+                    Context::$inParallelThread = false;
+                }
+            });
+
+            $slots[] = ['key' => $key, 'runtime' => $runtime, 'future' => $future];
+        }
+
+        foreach ($slots as $slot) {
+            $results[$slot['key']] = $slot['future']->value();
         }
 
         return $results;
@@ -1797,7 +1861,7 @@ final class Context
      */
     private static function isThreadEnvironment(): bool
     {
-        return defined('ZEND_THREAD_SAFE') && ZEND_THREAD_SAFE === true && self::parallelLoaded();
+        return self::$inParallelThread;
     }
 
     /**
@@ -1849,6 +1913,40 @@ final class Context
     private static function parallelLoaded(): bool
     {
         return self::$hasParallel ??= extension_loaded('parallel') && class_exists('\parallel\Runtime');
+    }
+
+    /**
+     * 定位 Composer 自动加载文件，供 parallel 工作线程引导
+     *
+     * parallel 的工作线程不会继承主线程已注册的自动加载器，必须在创建
+     * parallel\Runtime 时显式传入 autoload.php，否则 worker 内无法加载 Context 等类。
+     *
+     * 从当前文件向上逐级查找 vendor/autoload.php（同时兼容「包根目录」与
+     * 「vendor/kode/context」两种安装形态），结果缓存复用。
+     */
+    private static function parallelBootstrap(): string
+    {
+        if (self::$parallelBootstrap !== null) {
+            return self::$parallelBootstrap;
+        }
+
+        $dir = __DIR__;
+        $path = '';
+
+        while (dirname($dir) !== $dir) {
+            $candidate = $dir . '/vendor/autoload.php';
+
+            if (is_file($candidate)) {
+                $path = $candidate;
+                break;
+            }
+
+            $dir = dirname($dir);
+        }
+
+        self::$parallelBootstrap = $path;
+
+        return $path;
     }
 
     private static function swooleCid(): int

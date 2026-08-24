@@ -7,7 +7,6 @@
 /.phpunit.result.cache
 /coverage/
 /phpstan.neon.tmp
-phpstan.neon
 
 # IDE / 本地工具
 /.idea/
@@ -15,8 +14,9 @@ phpstan.neon
 .trae
 .workbuddy/
 
-# 本地文档（不入库）
-# 注：CHANGELOG.md 现已随版本发布进入仓库（见文件顶部说明）
+# 本地文档与工具（不入库）
+# phpstan.neon 纳入版本库（供 CI 使用）；CHANGELOG.md 仅本地维护
+CHANGELOG.md
 
 # OS
 .DS_Store

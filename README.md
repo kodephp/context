@@ -85,13 +85,13 @@ Context::clear();
 
 ---
 
-## ✨ v3.0 重大升级
+## ✨ v3 架构升级（WeakMap 隔离）
 
-v3.0 是一次架构性重构，目标是**彻底解决并发执行单元间的上下文污染**，并补齐企业级可观测性与安全能力。
+v3 是一次架构性重构，目标是**彻底解决并发执行单元间的上下文污染**，并补齐企业级可观测性与安全能力。
 
 ### 1. 真正的 Fiber / 协程隔离（WeakMap）
 
-旧版使用全局 `static` 初始化标志 + 引用绑定，在多个 Fiber 并发时会发生**数据串号**（一个 Fiber 读到另一个 Fiber 写入的值）。v3.0 改为以「执行单元对象」（`Fiber` / Swoole 协程 / Swow 协程 / 线程）为键，存入 `WeakMap`，每个单元持有**完全独立的 `ContextStore`**：
+旧版使用全局 `static` 初始化标志 + 引用绑定，在多个 Fiber 并发时会发生**数据串号**（一个 Fiber 读到另一个 Fiber 写入的值）。v3 改为以「执行单元对象」（`Fiber` / Swoole 协程 / Swow 协程 / 线程）为键，存入 `WeakMap`，每个单元持有**完全独立的 `ContextStore`**：
 
 - Fiber A 写入 `user=alice`，Fiber B 永远读不到，反之亦然；
 - 执行单元结束、对象被 GC 后，`WeakMap` 自动回收存储，无内存泄漏；
@@ -182,7 +182,7 @@ $scope->close(); // 或等 $scope 被 GC 时自动回滚
 | **多进程**              | 进程 ID + fork 继承                    | 支持 pcntl_fork                      |
 | **普通同步环境**           | 全局根存储                              | 单线程安全，兼容 CLI/HTTP                  |
 
-> ✅ v3.0 起，所有并发运行时统一采用 **`WeakMap<执行单元对象, 上下文存储>`** 实现真正的「每执行单元独占隔离」，从根本上修复了旧版 Fiber 共享存储导致的数据污染问题（旧版 `static` 全局标志 + 引用绑定会在多个 Fiber 间串数据）。
+> ✅ v3 起，所有并发运行时统一采用 **`WeakMap<执行单元对象, 上下文存储>`** 实现真正的「每执行单元独占隔离」，从根本上修复了旧版 Fiber 共享存储导致的数据污染问题（旧版 `static` 全局标志 + 引用绑定会在多个 Fiber 间串数据）。
 
 > ✅ 所有实现均保证：**每个并发执行单元拥有独立的上下文视图**
 
@@ -415,7 +415,7 @@ $spanId = Context::startSpan();
 
 ### W3C Trace Context（推荐）
 
-v3.0 原生支持 W3C `traceparent` / `tracestate` / `baggage` 规范，可与 OpenTelemetry 等标准链路系统直接互通：
+原生支持 W3C `traceparent` / `tracestate` / `baggage` 规范，可与 OpenTelemetry 等标准链路系统直接互通：
 
 ```php
 use Kode\Context\Context;
@@ -606,7 +606,7 @@ $result = Fibers::scheduleDistributedRemote(
 | `Context::afterFork(bool $inherit = true): void`                                      | fork 后初始化子进程上下文  |
 | `Context::runInProcess(callable $task, bool $inherit = true): int`                    | 在子进程中运行任务，返回 PID |
 | `Context::waitProcess(int $pid): int`                                                 | 等待指定子进程结束        |
-| `Context::parallelProcesses(array $tasks, int $max = 4, bool $inherit = true): array` | 进程池并行执行          |
+| `Context::parallelProcesses(array $tasks, int $max = 4, bool $inherit = true, bool $throwOnError = true): array` | 进程池并行执行（`$throwOnError=false` 时不抛异常，错误写入返回数组） |
 
 ### 多线程操作
 
@@ -661,7 +661,7 @@ $result = Fibers::scheduleDistributedRemote(
 ### 常量
 
 ```php
-// 运行时类型（v3.0 起全部为类型化常量 public const string）
+// 运行时类型（全部为类型化常量 public const string）
 Context::RUNTIME_FIBER    // 'fiber'
 Context::RUNTIME_SWOOLE   // 'swoole'
 Context::RUNTIME_SWOW     // 'swow'
@@ -727,7 +727,7 @@ Context::WILDCARD         // '*'  监听所有键的变更
 - Fiber 下注意闭包绑定问题（`$this` 上下文可能不同）
 - 分布式传递时，对象会被序列化（经 `ValueSerializer` 安全处理），资源句柄和闭包无法传递
 - 多进程功能需要 pcntl 扩展
-- 多线程功能需要 ZTS + parallel 扩展（v3.0 起已移除 pthreads 依赖）
+- 多线程功能需要 ZTS + parallel 扩展（不再依赖 pthreads）
 - 最低运行环境为 PHP 8.3+
 
 ---

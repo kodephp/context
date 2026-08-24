@@ -164,6 +164,76 @@ class ProcessThreadContextTest extends TestCase
         Context::parallelThreads([fn() => true]);
     }
 
+    /**
+     * 正向：runInThread 在真实 parallel 线程中执行并返回 Future
+     */
+    public function testRunInThreadReturnsFutureInRealThread(): void
+    {
+        if (!extension_loaded('parallel')) {
+            $this->markTestSkipped('parallel 扩展未安装');
+        }
+
+        $future = Context::runInThread(static fn (): int => 42);
+
+        $this->assertInstanceOf(\parallel\Future::class, $future);
+        $this->assertSame(42, $future->value());
+    }
+
+    /**
+     * 正向：parallelThreads 有界线程池（并发数 < 任务数）必须全部正确执行
+     *
+     * 复现 v3.1.0 隐藏 bug：原实现用 count%max 轮询复用 runtime，
+     * 在 maxThreads < 任务数时会向仍在忙的 runtime 再次 run() 抛 parallel\Runtime\Error。
+     */
+    public function testParallelThreadsBoundedPoolRunsAllTasks(): void
+    {
+        if (!extension_loaded('parallel')) {
+            $this->markTestSkipped('parallel 扩展未安装');
+        }
+
+        $tasks = [];
+        $expected = [];
+
+        for ($i = 0; $i < 8; $i++) {
+            $tasks["k$i"] = static function () use ($i): int {
+                usleep(2000);
+
+                return $i * 2;
+            };
+            $expected["k$i"] = $i * 2;
+        }
+
+        $results = Context::parallelThreads($tasks, 2, false);
+
+        ksort($results);
+        $this->assertSame($expected, $results);
+    }
+
+    /**
+     * 正向：parallelProcesses 进程池（pcntl fork）必须全部正确执行
+     */
+    public function testParallelProcessesRunsAllTasks(): void
+    {
+        if (!function_exists('pcntl_fork')) {
+            $this->markTestSkipped('pcntl 扩展未安装');
+        }
+
+        $tasks = [];
+        $expected = [];
+
+        for ($i = 0; $i < 6; $i++) {
+            $tasks["p$i"] = static function () use ($i): int {
+                return $i + 1;
+            };
+            $expected["p$i"] = $i + 1;
+        }
+
+        $results = Context::parallelProcesses($tasks, 2, false);
+
+        ksort($results);
+        $this->assertSame($expected, $results);
+    }
+
     public function testRuntimeConstants(): void
     {
         $this->assertEquals('fiber', Context::RUNTIME_FIBER);

@@ -4,7 +4,7 @@
     "keywords": ["context", "coroutine", "fiber", "swoole", "swow", "request-context", "php83", "distributed", "tracing", "opentelemetry", "w3c-trace-context", "上下文", "协程", "纤程", "分布式", "链路追踪"],
     "homepage": "https://github.com/kodephp/context",
     "license": "Apache-2.0",
-    "version": "3.1.0",
+    "version": "3.1.1",
     "authors": [
         {
             "name": "KodePHP",
@@ -50,7 +50,7 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-master": "3.0.x-dev"
+            "dev-master": "3.1.x-dev"
         }
     },
     "config": {
