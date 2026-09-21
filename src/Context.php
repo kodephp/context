@@ -61,6 +61,15 @@ final class Context
     /** 请求 ID */
     public const string REQUEST_ID = 'request_id';
 
+    /**
+     * 框架内部瞬态键前缀
+     *
+     * 以该前缀入栈的值（如 kode/http 绑定的当前请求对象）只绑定当前运行时，
+     * 永不出现在 export()/toJson() 中，也不接受 import()/fromHeaders() 注入，
+     * 避免把 Authorization/Cookie 等敏感运行时对象带进会话或跨进程载荷。
+     */
+    public const string INTERNAL_PREFIX = '__kode_';
+
     /** 关联 ID */
     public const string CORRELATION_ID = 'correlation_id';
 
@@ -273,13 +282,19 @@ final class Context
     }
 
     /**
-     * 清空当前上下文所有数据
+     * 清空当前执行单元的全部上下文（含未关闭的嵌套作用域栈）
+     *
+     * 语义为「整体重置」：清空后，此前创建的 ContextScope / run() / fork()
+     * 作用域句柄全部失效，析构时不会再把陈旧快照覆盖回来，
+     * 因此可安全用作请求边界的清理手段。
      */
     public static function clear(): void
     {
         $store = self::store();
         $oldData = $store->data;
         $store->data = [];
+        $store->stack = [];
+        $store->epoch++;
 
         foreach ($oldData as $key => $value) {
             self::triggerListener($key, $value, null);
@@ -718,11 +733,20 @@ final class Context
     {
         $store = self::store();
         $depth = $store->push($initial);
+        $epoch = $store->epoch;
 
         try {
             return $callable();
         } finally {
-            $store->unwind($depth);
+            if ($store->epoch === $epoch) {
+                $store->unwind($depth);
+            } else {
+                // 作用域存续期间发生过 clear()：栈帧已被整体丢弃，
+                // 继续执行会把这个作用域残余的数据带回调用方，故再做一次清空。
+                $store->data = [];
+                $store->stack = [];
+                $store->epoch++;
+            }
         }
     }
 
@@ -1320,6 +1344,8 @@ final class Context
     /**
      * 导出可序列化的上下文数据
      *
+     * 框架内部瞬态键（INTERNAL_PREFIX 前缀）一律排除，即使显式列入 $onlyKeys。
+     *
      * @param list<string> $onlyKeys 仅导出指定键
      * @return array<string, mixed>
      */
@@ -1334,6 +1360,10 @@ final class Context
         $result = [];
 
         foreach ($data as $key => $value) {
+            if (is_string($key) && str_starts_with($key, self::INTERNAL_PREFIX)) {
+                continue;
+            }
+
             $result[$key] = ValueSerializer::encode($value);
         }
 
@@ -1342,6 +1372,8 @@ final class Context
 
     /**
      * 导入上下文数据
+     *
+     * 外部来源（JSON / 请求头 / 队列载荷）不得注入框架内部瞬态键。
      *
      * @param array<string, mixed> $data  导入的数据
      * @param bool                 $merge 是否合并到现有上下文
@@ -1352,6 +1384,10 @@ final class Context
         $result = [];
 
         foreach ($data as $key => $value) {
+            if (is_string($key) && str_starts_with($key, self::INTERNAL_PREFIX)) {
+                continue;
+            }
+
             $result[$key] = ValueSerializer::decode($value);
         }
 
@@ -1687,7 +1723,8 @@ final class Context
 
             $key = str_replace('-', '_', substr($name, $prefixLen));
 
-            if ($key === '') {
+            // 只接受合法的上下文键名，杜绝经由请求头注入内部瞬态键或畸形键
+            if (preg_match('/^[a-z][a-z0-9_]{0,63}$/', $key) !== 1) {
                 continue;
             }
 

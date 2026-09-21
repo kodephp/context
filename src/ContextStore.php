@@ -34,6 +34,14 @@ final class ContextStore
     public array $stack = [];
 
     /**
+     * 存储代数：clear()/reset() 等整体清空操作使其递增
+     *
+     * 作用域句柄（ContextScope）创建时记录当时的代数，回滚时代数不符
+     * 说明栈已被整体清空，陈旧快照绝不允许再覆盖当前数据。
+     */
+    public int $epoch = 0;
+
+    /**
      * 进入一个新的作用域层级
      *
      * @param array<string, mixed> $initial 新作用域的初始数据
@@ -73,10 +81,13 @@ final class ContextStore
 
     /**
      * 清空存储
+     *
+     * 递增代数，使此前创建的所有作用域句柄失效。
      */
     public function reset(): void
     {
         $this->data = [];
         $this->stack = [];
+        $this->epoch++;
     }
 }

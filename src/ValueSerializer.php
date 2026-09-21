@@ -105,15 +105,41 @@ final class ValueSerializer
 
     /**
      * 编码单个值
+     *
+     * 带环检测与深度上限：对象图上出现环（如 PSR-7 请求与属性互引）时，
+     * 第二次遇到同一对象编码为 reference 标记，避免无限递归撑爆调用栈。
      */
     public static function encode(mixed $value): mixed
+    {
+        return self::encodeValue($value, [], 0);
+    }
+
+    /** 递归深度上限，超出编码为 truncated 标记 */
+    private const int MAX_DEPTH = 32;
+
+    /**
+     * 递归编码实现
+     *
+     * @param array<int, true> $seen 当前路径上的对象 id 集合
+     * @param int              $depth 当前递归深度
+     */
+    private static function encodeValue(mixed $value, array $seen, int $depth): mixed
     {
         if ($value === null || is_scalar($value)) {
             return $value;
         }
 
         if (is_array($value)) {
-            return array_map(self::encode(...), $value);
+            if ($depth >= self::MAX_DEPTH) {
+                return [self::TYPE_KEY => 'truncated'];
+            }
+
+            $next = $depth + 1;
+
+            return array_map(
+                static fn (mixed $v): mixed => self::encodeValue($v, $seen, $next),
+                $value,
+            );
         }
 
         if (is_resource($value)) {
@@ -127,13 +153,25 @@ final class ValueSerializer
             return $value;
         }
 
+        $id = spl_object_id($value);
+
+        if (isset($seen[$id]) || $depth >= self::MAX_DEPTH) {
+            return [
+                self::TYPE_KEY => isset($seen[$id]) ? 'reference' : 'truncated',
+                'class' => $value::class,
+            ];
+        }
+
+        $seen[$id] = true;
+        $next = $depth + 1;
+
         $class = $value::class;
 
         if (isset(self::$codecs[$class])) {
             return [
                 self::TYPE_KEY => 'custom',
                 'class' => $class,
-                'value' => self::encode((self::$codecs[$class]['encode'])($value)),
+                'value' => self::encodeValue((self::$codecs[$class]['encode'])($value), $seen, $next),
             ];
         }
 
@@ -172,7 +210,7 @@ final class ValueSerializer
             return [
                 self::TYPE_KEY => 'json_serializable',
                 'class' => $class,
-                'value' => self::encode($value->jsonSerialize()),
+                'value' => self::encodeValue($value->jsonSerialize(), $seen, $next),
             ];
         }
 
@@ -183,14 +221,14 @@ final class ValueSerializer
             return [
                 self::TYPE_KEY => 'serializable',
                 'class' => $class,
-                'value' => self::encode($state),
+                'value' => self::encodeValue($state, $seen, $next),
             ];
         }
 
         return [
             self::TYPE_KEY => 'object',
             'class' => $class,
-            'value' => self::encode(get_object_vars($value)),
+            'value' => self::encodeValue(get_object_vars($value), $seen, $next),
         ];
     }
 
@@ -219,7 +257,7 @@ final class ValueSerializer
             'custom' => self::decodeCustom($class, $payload),
             'serializable', 'object' => self::decodeObject($class, $payload),
             'json_serializable' => $payload,
-            'closure', 'resource' => null,
+            'closure', 'resource', 'reference', 'truncated' => null,
             default => $payload ?? $value,
         };
     }
@@ -245,7 +283,8 @@ final class ValueSerializer
      */
     private static function decodeEnum(?string $class, mixed $payload): mixed
     {
-        if ($class === null || !enum_exists($class) || !is_subclass_of($class, BackedEnum::class)) {
+        // enum_exists 第二参 false：不为未知类名触发自动加载
+        if ($class === null || !enum_exists($class, false) || !is_subclass_of($class, BackedEnum::class)) {
             return $payload;
         }
 
@@ -261,7 +300,7 @@ final class ValueSerializer
      */
     private static function decodeUnitEnum(?string $class, mixed $name): mixed
     {
-        if ($class === null || !is_string($name) || !enum_exists($class)) {
+        if ($class === null || !is_string($name) || !enum_exists($class, false)) {
             return $name;
         }
 

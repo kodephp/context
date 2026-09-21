@@ -79,7 +79,9 @@ Context::fork(fn() => {
     Context::set('temp', 'value'); // 不影响外部
 });
 
-// 清空当前上下文
+// 清空当前上下文（v3.2 起为「整体重置」：连同未关闭的作用域栈一起回收，
+// 此前创建的 enter()/run() 句柄失效，析构时不会把陈旧快照覆盖回来。
+// kode/http 3.5 起以此作为请求边界收口手段）
 Context::clear();
 ```
 
@@ -523,7 +525,7 @@ $result = Fibers::scheduleDistributedRemote(
 | `Context::hasAll(array $keys): bool`                      | 判断所有指定键是否均存在（空数组返回 true） |
 | `Context::hasAny(array $keys): bool`                      | 判断是否存在任意一个指定键（空数组返回 false） |
 | `Context::delete(string $key): void`                      | 删除指定键   |
-| `Context::clear(): void`                                  | 清空当前上下文 |
+| `Context::clear(): void`                                  | 整体重置当前执行单元上下文（含作用域栈，使陈旧句柄失效） |
 
 ### 批量操作
 
@@ -621,8 +623,8 @@ $result = Fibers::scheduleDistributedRemote(
 | --------------------------------------------------------------------------------- | ----------------------------------------------------- |
 | `Context::toJson(array $onlyKeys = []): string`                                   | 序列化为 JSON                                             |
 | `Context::fromJson(string $json, bool $merge = false): array`                     | 从 JSON 反序列化                                           |
-| `Context::export(array $onlyKeys = []): array`                                    | 导出可序列化数据                                              |
-| `Context::import(array $data, bool $merge = false): array`                        | 导入数据                                                  |
+| `Context::export(array $onlyKeys = []): array`                                    | 导出可序列化数据（自动排除 `__kode_` 内部瞬态键）              |
+| `Context::import(array $data, bool $merge = false): array`                        | 导入数据（拒收 `__kode_` 内部瞬态键）                          |
 | `Context::startTrace(?string $traceId = null, ?string $nodeId = null): string`    | 启动内部追踪                                                |
 | `Context::startSpan(): string`                                                    | 创建子 Span                                              |
 | `Context::getTraceInfo(): array`                                                  | 获取追踪信息                                                |
@@ -635,7 +637,7 @@ $result = Fibers::scheduleDistributedRemote(
 | `Context::toW3CHeaders(): array`                                                  | 导出 `traceparent`/`tracestate`/`baggage` 为 HTTP Header |
 | `Context::fromW3CHeaders(array $headers): bool`                                   | 从 HTTP Header 还原 W3C 上下文                              |
 | `Context::toHeaders(string $prefix = 'X-Context-'): array`                        | 导出为自定义 Headers                                        |
-| `Context::fromHeaders(array $headers, string $prefix = 'X-Context-'): void`       | 从自定义 Headers 导入                                       |
+| `Context::fromHeaders(array $headers, string $prefix = 'X-Context-'): void`       | 从自定义 Headers 导入（键名须匹配 `^[a-z][a-z0-9_]{0,63}$`）  |
 | `Context::continueTrace(array $headers, string $prefix = 'X-Context-'): void`     | 从上游 Header 继续追踪链路                                     |
 | `Context::getDistributedKeys(): array`                                            | 获取分布式键                                                |
 | `Context::exportForDistributed(): array`                                          | 导出分布式上下文                                              |
@@ -796,6 +798,24 @@ Context::WILDCARD         // '*'  监听所有键的变更
 ```bash
 composer run benchmark
 ```
+
+---
+
+## 🗂 版本要点
+
+### v3.2.0
+
+- **`clear()` 升级为「整体重置」**：连同未关闭的作用域栈一起回收，并引入存储代数（epoch）守卫——
+  此前创建的 `enter()` / `run()` 句柄在 clear 后析构时不再把陈旧快照覆盖回当前数据，
+  可安全用作常驻服务的请求边界清理手段（配合 kode/http 3.5 的 `Request::clear()` 收口）。
+- **`ValueSerializer::encode()` 环检测 + 深度上限**：对象图成环（如 PSR-7 请求与其属性互引）
+  不再无限递归爆栈，重复对象编码为 `reference` 标记、超深结构编码为 `truncated` 标记，解码为 null。
+- **内部瞬态键出入站隔离**：`export()` / `toJson()` 一律排除 `__kode_` 前缀键
+  （如 kode/http 绑定的当前请求对象，含 Authorization/Cookie），`import()` / `fromJson()` 拒收同名注入；
+  `copy()` / `transaction()` 快照语义不变，运行时对象照常随事务恢复。
+- **`fromHeaders()` 键名白名单化**：仅接受 `^[a-z][a-z0-9_]{0,63}$`，畸形键与内部前缀键直接丢弃。
+- **解码不再为未知类名触发自动加载**：`enum_exists()` 探测关闭 autoload，杜绝经 JSON 载荷
+  投喂类名引发的自动加载副作用。
 
 ---
 

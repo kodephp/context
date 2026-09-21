@@ -28,6 +28,9 @@ final class ContextScope
 {
     private bool $closed = false;
 
+    /** 创建时的存储代数，用于识别栈已被 clear()/reset() 整体清空的情况 */
+    private readonly int $epoch;
+
     /**
      * @param ContextStore $store 所属执行单元的存储
      * @param int          $depth 进入作用域时的深度
@@ -38,10 +41,14 @@ final class ContextScope
         private readonly ContextStore $store,
         private readonly int $depth,
     ) {
+        $this->epoch = $store->epoch;
     }
 
     /**
      * 关闭作用域并回滚上下文
+     *
+     * 若创建后存储经历过整体清空（代数变化），栈帧已不存在，
+     * 跳过回滚以避免陈旧快照覆盖当前数据。
      */
     public function close(): void
     {
@@ -50,6 +57,11 @@ final class ContextScope
         }
 
         $this->closed = true;
+
+        if ($this->store->epoch !== $this->epoch) {
+            return;
+        }
+
         $this->store->unwind($this->depth);
     }
 
