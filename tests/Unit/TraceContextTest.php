@@ -6,6 +6,7 @@ namespace Kode\Context\Tests\Unit;
 
 use Kode\Context\Context;
 use Kode\Context\TraceContext;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -91,9 +92,7 @@ class TraceContextTest extends TestCase
         ];
     }
 
-    /**
-     * @dataProvider invalidTraceparentProvider
-     */
+    #[DataProvider('invalidTraceparentProvider')]
     public function testParseRejectsInvalidHeaders(string $header): void
     {
         $this->assertNull(TraceContext::parse($header));
