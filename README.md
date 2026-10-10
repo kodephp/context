@@ -1,6 +1,6 @@
 # kode/context - PHP 协程/纤程上下文管理包
 
-![PHP Version](https://img.shields.io/badge/PHP-8.3%2B-blue)
+![PHP Version](https://img.shields.io/badge/PHP-8.4%2B-blue)
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-green)
 
