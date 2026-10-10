@@ -8,7 +8,6 @@
         "swoole",
         "swow",
         "request-context",
-        "php83",
         "distributed",
         "tracing",
         "opentelemetry",
@@ -17,11 +16,12 @@
         "协程",
         "纤程",
         "分布式",
-        "链路追踪"
+        "链路追踪",
+        "php84"
     ],
     "homepage": "https://github.com/kodephp/context",
     "license": "Apache-2.0",
-    "version": "4.0.0",
+    "version": "4.0.1",
     "authors": [
         {
             "name": "KodePHP",
