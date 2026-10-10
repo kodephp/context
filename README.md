@@ -22,8 +22,8 @@
 - ✅ 多线程（ZTS + parallel）上下文隔离
 - ✅ 支持透明传递请求上下文（如：`user`, `request`, `trace_id`）
 - ✅ 提供与 Go `context.Context` 类似的语义模型
-- ✅ 兼容原生 PHP、Fiber（PHP 8.3+）、Swoole、Swow 等多种运行时环境
-- ✅ 最低要求 PHP 8.3+（基于 WeakMap、enum、类型化常量等现代特性）
+- ✅ 兼容原生 PHP、Fiber（PHP 8.4+）、Swoole、Swow 等多种运行时环境
+- ✅ 最低要求 PHP 8.4+（基于 WeakMap、enum、类型化常量等现代特性）
 - ✅ 使用 final 类、类型安全、反射等更安全的方式实现
 - ✅ **支持分布式多机器部署的上下文传递**
 
@@ -37,7 +37,7 @@
 | 原生 PHP + 多线程（ZTS） | 线程共享内存，`static` 被所有线程共享   | ❌ 存在风险      |
 | Swoole 协程         | 协程共享线程内存，`static` 被复用     | ❌ 极易污染      |
 | Swow 协程           | 同上，绿色线程模型                 | ❌ 存在上下文混淆   |
-| PHP 8.3+ Fiber    | Fiber 共享调用栈中的 `static` 变量 | ❌ 数据交叉污染    |
+| PHP 8.4+ Fiber    | Fiber 共享调用栈中的 `static` 变量 | ❌ 数据交叉污染    |
 | **分布式多机器**        | 跨节点调用时上下文丢失               | ✅ **序列化传递** |
 
 👉 **结论：只要存在"并发执行单元共享主线程内存"的情况，就必须使用上下文隔离机制！**
@@ -730,7 +730,7 @@ Context::WILDCARD         // '*'  监听所有键的变更
 - 分布式传递时，对象会被序列化（经 `ValueSerializer` 安全处理），资源句柄和闭包无法传递
 - 多进程功能需要 pcntl 扩展
 - 多线程功能需要 ZTS + parallel 扩展（不再依赖 pthreads）
-- 最低运行环境为 PHP 8.3+
+- 最低运行环境为 PHP 8.4+
 
 ---
 

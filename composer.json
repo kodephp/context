@@ -1,10 +1,27 @@
 {
     "name": "kode/context",
     "description": "轻量级、高性能的 PHP 协程/纤程上下文管理库，支持分布式多机器部署与 W3C Trace Context 标准",
-    "keywords": ["context", "coroutine", "fiber", "swoole", "swow", "request-context", "php83", "distributed", "tracing", "opentelemetry", "w3c-trace-context", "上下文", "协程", "纤程", "分布式", "链路追踪"],
+    "keywords": [
+        "context",
+        "coroutine",
+        "fiber",
+        "swoole",
+        "swow",
+        "request-context",
+        "php83",
+        "distributed",
+        "tracing",
+        "opentelemetry",
+        "w3c-trace-context",
+        "上下文",
+        "协程",
+        "纤程",
+        "分布式",
+        "链路追踪"
+    ],
     "homepage": "https://github.com/kodephp/context",
     "license": "Apache-2.0",
-    "version": "3.2.0",
+    "version": "4.0.0",
     "authors": [
         {
             "name": "KodePHP",
@@ -16,7 +33,7 @@
         "source": "https://github.com/kodephp/context"
     },
     "require": {
-        "php": "^8.3"
+        "php": "^8.4"
     },
     "require-dev": {
         "phpunit/phpunit": "^10.5 || ^11.0",
