@@ -239,12 +239,7 @@ final class Context
     public static function hasAll(array $keys): bool
     {
         $data = self::store()->data;
-        foreach ($keys as $key) {
-            if (!array_key_exists($key, $data)) {
-                return false;
-            }
-        }
-        return true;
+        return array_all($keys, fn($key) => array_key_exists($key, $data));
     }
 
     /**
@@ -257,12 +252,7 @@ final class Context
     public static function hasAny(array $keys): bool
     {
         $data = self::store()->data;
-        foreach ($keys as $key) {
-            if (array_key_exists($key, $data)) {
-                return true;
-            }
-        }
-        return false;
+        return array_any($keys, fn($key) => array_key_exists($key, $data));
     }
 
     /**

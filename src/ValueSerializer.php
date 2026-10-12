@@ -304,13 +304,7 @@ final class ValueSerializer
             return $name;
         }
 
-        foreach ($class::cases() as $case) {
-            if ($case->name === $name) {
-                return $case;
-            }
-        }
-
-        return $name;
+        return array_find($class::cases(), fn($case) => $case->name === $name) ?? $name;
     }
 
     /**
