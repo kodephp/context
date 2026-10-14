@@ -262,4 +262,15 @@ final class TraceContext
 
         return implode(',', $parts);
     }
+
+    /**
+     * 清洗 HTTP 头值：剔除 CR / LF / NUL 等控制字符（保留 HTAB）
+     *
+     * 用于出站头构造与上下文导入的统一防线，杜绝经由 tracestate / baggage /
+     * X-Context-* 值的 CRLF 头注入（响应拆分 / 请求走私）。
+     */
+    public static function sanitizeHeaderValue(string $value): string
+    {
+        return preg_replace('/[\x00-\x08\x0A-\x1F\x7F]/', '', $value) ?? '';
+    }
 }

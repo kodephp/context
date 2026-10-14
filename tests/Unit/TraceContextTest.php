@@ -301,4 +301,62 @@ class TraceContextTest extends TestCase
 
         $this->assertSame($traceId, Context::get(Context::TRACE_ID));
     }
+
+    public function testSanitizeHeaderValueStripsCrlfAndControls(): void
+    {
+        $this->assertSame('abc', TraceContext::sanitizeHeaderValue("a\r\nb\x00c"));
+        $this->assertSame("keep\ttab", TraceContext::sanitizeHeaderValue("keep\ttab"));
+        $this->assertSame('', TraceContext::sanitizeHeaderValue("\r\n"));
+        $this->assertSame('plain', TraceContext::sanitizeHeaderValue('plain'));
+    }
+
+    public function testToW3CHeadersStripsInjectedCrlf(): void
+    {
+        Context::startTrace();
+        $traceId = Context::get(Context::TRACE_ID);
+        Context::set(Context::TRACE_STATE, "vendor=x\r\nX-Injected: evil");
+        Context::set(Context::BAGGAGE, "k=v\r\nX-Injected: evil");
+
+        $headers = Context::toW3CHeaders();
+
+        $this->assertArrayNotHasKey('x-injected', array_change_key_case($headers));
+        $this->assertStringNotContainsString("\r", $headers['tracestate']);
+        $this->assertStringNotContainsString("\n", $headers['tracestate']);
+        $this->assertStringNotContainsString("\r", $headers['baggage']);
+        $this->assertStringNotContainsString("\n", $headers['baggage']);
+        $this->assertSame($traceId, Context::get(Context::TRACE_ID));
+    }
+
+    public function testToHeadersStripsInjectedCrlf(): void
+    {
+        Context::set(Context::REQUEST_ID, "req-1\r\nX-Injected: evil");
+
+        $headers = Context::toHeaders();
+
+        $this->assertSame('req-1X-Injected: evil', $headers['X-Context-Request-Id']);
+        $this->assertStringNotContainsString("\r", $headers['X-Context-Request-Id']);
+        $this->assertStringNotContainsString("\n", $headers['X-Context-Request-Id']);
+    }
+
+    public function testFromTraceparentStripsInjectedCrlf(): void
+    {
+        $ok = Context::fromTraceparent(
+            '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+            "vendor=x\r\nX-Injected: evil"
+        );
+
+        $this->assertTrue($ok);
+        $this->assertStringNotContainsString("\r", (string) Context::get(Context::TRACE_STATE));
+        $this->assertStringNotContainsString("\n", (string) Context::get(Context::TRACE_STATE));
+    }
+
+    public function testFromHeadersStripsInjectedCrlf(): void
+    {
+        Context::fromHeaders([
+            'X-Context-Request-Id' => "req-1\r\nX-Injected: evil",
+        ]);
+
+        $this->assertStringNotContainsString("\r", (string) Context::get(Context::REQUEST_ID));
+        $this->assertStringNotContainsString("\n", (string) Context::get(Context::REQUEST_ID));
+    }
 }

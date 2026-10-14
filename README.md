@@ -141,6 +141,12 @@ $wire = ValueSerializer::encode($value);  // 安全编码
 $back = ValueSerializer::decode($wire);   // 安全还原（恶意载荷降级为数组）
 ```
 
+**头值 CRLF 清洗（防头注入）**：`toHeaders()` / `toW3CHeaders()` 出站与
+`fromHeaders()` / `fromTraceparent()` / `fromW3CHeaders()` 入站均自动剔除
+tracestate / baggage / X-Context-* 值中的 CR / LF / NUL 控制字符（保留 HTAB），
+杜绝经由上下文值的 HTTP 头注入（响应拆分 / 请求走私）。程序化
+`Context::set(REQUEST_ID, $untrusted)` 等路径同样被出站清洗兜底。
+
 ### 4. 类型安全访问器与便捷 API
 
 ```php

@@ -1581,7 +1581,7 @@ final class Context
         self::set(self::TRACE_FLAGS, $parsed['flags']);
 
         if ($tracestate !== null && $tracestate !== '') {
-            self::set(self::TRACE_STATE, $tracestate);
+            self::set(self::TRACE_STATE, TraceContext::sanitizeHeaderValue($tracestate));
         }
 
         return true;
@@ -1627,12 +1627,12 @@ final class Context
 
         $tracestate = self::get(self::TRACE_STATE);
         if (is_string($tracestate) && $tracestate !== '') {
-            $headers['tracestate'] = $tracestate;
+            $headers['tracestate'] = TraceContext::sanitizeHeaderValue($tracestate);
         }
 
         $baggage = self::get(self::BAGGAGE);
         if (is_string($baggage) && $baggage !== '') {
-            $headers['baggage'] = $baggage;
+            $headers['baggage'] = TraceContext::sanitizeHeaderValue($baggage);
         }
 
         return $headers;
@@ -1650,7 +1650,7 @@ final class Context
 
         $baggage = $normalized['baggage'] ?? null;
         if (is_string($baggage) && $baggage !== '') {
-            self::set(self::BAGGAGE, $baggage);
+            self::set(self::BAGGAGE, TraceContext::sanitizeHeaderValue($baggage));
         }
 
         $traceparent = $normalized['traceparent'] ?? null;
@@ -1680,7 +1680,7 @@ final class Context
             $headers[$prefix . str_replace('_', '-', ucwords($key, '_'))] = match (true) {
                 is_bool($value) => $value ? '1' : '0',
                 $value === null => '',
-                default => (string)$value,
+                default => TraceContext::sanitizeHeaderValue((string) $value),
             };
         }
 
@@ -1718,7 +1718,9 @@ final class Context
                 continue;
             }
 
-            $data[$key] = $key === self::TRACE_FLAGS ? (int)$value : $value;
+            $data[$key] = $key === self::TRACE_FLAGS
+                ? (int) $value
+                : (is_string($value) ? TraceContext::sanitizeHeaderValue($value) : $value);
         }
 
         if ($data !== []) {
