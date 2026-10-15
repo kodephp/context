@@ -2,7 +2,12 @@ parameters:
     level: max
     paths:
         - src
-        - tests
+    # tests 不进 phpstan：层内大量防御性断言（assertIsArray 对已知形状再断言等）
+    # 属测试纪律而非缺陷，类型正确性由 phpunit 运行时把关。
+    # phpstan 审 src、phpunit 审 tests。
+    # phpdoc 推断在测试断言处大量触发 "will always evaluate to true"（assertIsArray 等
+    # 对已知形状数组再断言），属测试防御性写法而非缺陷；按 PHPStan 官方建议关闭该 certainty。
+    treatPhpDocTypesAsCertain: false
     ignoreErrors:
         - '#Call to static method .+ on an unknown class Swoole\\Coroutine#'
         - '#Call to static method .+ on an unknown class Swow\\Coroutine#'

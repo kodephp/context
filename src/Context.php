@@ -924,8 +924,10 @@ final class Context
 
     /**
      * 获取当前执行单元 ID（协程/纤程/线程/进程）
+     *
+     * @return int|null 执行单元 ID；Sync 运行时（主线程/主进程）返回 null
      */
-    public static function getExecutionId(): int|string|null
+    public static function getExecutionId(): ?int
     {
         return match (self::runtime()) {
             Runtime::Fiber => self::fiberId(),
@@ -939,8 +941,10 @@ final class Context
 
     /**
      * 获取当前执行单元 ID（getExecutionId 的兼容别名）
+     *
+     * @return int|null 执行单元 ID；Sync 运行时返回 null
      */
-    public static function getCoroutineId(): int|string|null
+    public static function getCoroutineId(): ?int
     {
         return self::getExecutionId();
     }
@@ -1072,8 +1076,10 @@ final class Context
 
         $status = 0;
         pcntl_waitpid($pid, $status);
+        // pcntl_waitpid 以引用回写 $status（桩类型为 mixed），静态分析无法跟踪，收窄回 int
+        /** @var int $status */
 
-        return pcntl_wifexited($status) ? (int)pcntl_wexitstatus($status) : -1;
+        return pcntl_wifexited($status) ? (int) pcntl_wexitstatus($status) : -1;
     }
 
     /**
@@ -1189,7 +1195,6 @@ final class Context
         $bootstrap = self::parallelBootstrap();
         $runtime = $bootstrap === '' ? new \parallel\Runtime() : new \parallel\Runtime($bootstrap);
 
-        /** @var object $future */
         $future = $runtime->run(static function () use ($task, $snapshot): mixed {
             Context::$inParallelThread = true;
 
@@ -1202,7 +1207,8 @@ final class Context
             }
         });
 
-        return $future;
+        // parallel\Runtime::run 桩标注可能返回 null（扩展已在入口校验存在，此处为防御性兜底）
+        return $future ?? throw new ContextException('parallel 运行时启动失败，未能创建 Future');
     }
 
     /**
